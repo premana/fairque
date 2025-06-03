@@ -25,6 +25,7 @@ from fairque.core.exceptions import (
     TaskValidationError,
 )
 from fairque.core.models import DLQEntry, Priority, Task
+from fairque.decorator import TaskFactory, create_task, get_task_metadata, is_fairque_task, task
 from fairque.queue.async_queue import AsyncTaskQueue
 from fairque.queue.queue import TaskQueue
 from fairque.worker.async_worker import AsyncTaskHandler, AsyncWorker
@@ -52,6 +53,12 @@ __all__ = [
     "Worker",
     "AsyncTaskHandler",
     "AsyncWorker",
+    # Task decorators and utilities
+    "task",
+    "create_task",
+    "is_fairque_task",
+    "get_task_metadata",
+    "TaskFactory",
     # Exceptions
     "FairQueueError",
     "LuaScriptError",

@@ -20,9 +20,30 @@ logger = logging.getLogger(__name__)
 class TaskHandler(ABC):
     """Abstract base class for task handlers."""
 
-    @abstractmethod
     def process_task(self, task: Task) -> bool:
-        """Process a task.
+        """Process a task. If task has func set, execute it automatically.
+
+        Args:
+            task: Task to process
+
+        Returns:
+            True if task processed successfully, False otherwise
+        """
+        if task.func is not None:
+            try:
+                result = task()  # Use __call__ method
+                logger.debug(f"Function task executed successfully: {task.task_id}, result: {result}")
+                return True
+            except Exception as e:
+                logger.error(f"Function execution failed for task {task.task_id}: {e}")
+                return False
+        else:
+            # Call the custom implementation
+            return self._process_task(task)
+
+    @abstractmethod
+    def _process_task(self, task: Task) -> bool:
+        """Override this method for custom task processing.
 
         Args:
             task: Task to process
