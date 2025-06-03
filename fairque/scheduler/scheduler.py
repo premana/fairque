@@ -209,7 +209,7 @@ class TaskScheduler:
 
         except redis.RedisError as e:
             logger.error(f"Failed to update schedule: {e}")
-            raise RedisConnectionError(f"Failed to update schedule: {e}")
+            raise RedisConnectionError(f"Failed to update schedule: {e}") from e
 
     def remove_schedule(self, schedule_id: str) -> bool:
         """Remove a scheduled task.
