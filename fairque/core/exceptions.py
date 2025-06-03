@@ -42,6 +42,12 @@ class TaskSerializationError(FairQueueError):
     pass
 
 
+class FunctionResolutionError(FairQueueError):
+    """Raised when function resolution fails completely."""
+
+    pass
+
+
 class ConfigurationError(FairQueueError):
     """Configuration validation error."""
 

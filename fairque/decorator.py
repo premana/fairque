@@ -5,6 +5,7 @@ import os
 import time
 from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
 
+from fairque.core.function_registry import FunctionRegistry
 from fairque.core.models import Priority, Task
 
 F = TypeVar('F', bound=Callable[..., Any])
@@ -43,26 +44,21 @@ def task(
         queue.push(task_instance)  # Push to queue
     """
     def decorator(func: F) -> Callable[..., Task]:
+        # Auto-register function for fallback resolution
+        registry_name = f"{func.__module__}.{func.__name__}"
+        FunctionRegistry.register(registry_name, func)
+
         @functools.wraps(func)
         def wrapper(*args, **kwargs) -> Task:
-            # Determine user_id
-            effective_user_id = user_id
-            if effective_user_id is None:
-                effective_user_id = os.environ.get("USER", "unknown")
-
-            # Determine execute_after
-            effective_execute_after = execute_after
-            if effective_execute_after is None:
-                effective_execute_after = time.time()
-
-            # Merge payload
+            # Create task with function reference
+            effective_user_id = user_id or os.environ.get("USER", "unknown")
+            effective_execute_after = execute_after or time.time()
             effective_payload = payload.copy() if payload else {}
             effective_payload.update({
                 "function_name": func.__name__,
                 "module": func.__module__,
             })
 
-            # Create task with function and arguments
             return Task.create(
                 user_id=effective_user_id,
                 priority=priority,

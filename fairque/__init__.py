@@ -19,6 +19,7 @@ from fairque.core.config import FairQueueConfig, QueueConfig, RedisConfig, Worke
 from fairque.core.exceptions import (
     ConfigurationError,
     FairQueueError,
+    FunctionResolutionError,
     LuaScriptError,
     RedisConnectionError,
     TaskSerializationError,
@@ -61,6 +62,7 @@ __all__ = [
     "TaskFactory",
     # Exceptions
     "FairQueueError",
+    "FunctionResolutionError",
     "LuaScriptError",
     "TaskValidationError",
     "RedisConnectionError",

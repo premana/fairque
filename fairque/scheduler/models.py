@@ -1,18 +1,21 @@
 """Models for task scheduling functionality."""
 
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from fairque.core.models import Priority, Task
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ScheduledTask:
-    """Scheduled task with cron expression.
+    """Scheduled task with cron expression and function execution support.
 
     Attributes:
         schedule_id: Unique identifier for the scheduled task
@@ -27,6 +30,9 @@ class ScheduledTask:
         created_at: Timestamp when schedule was created
         updated_at: Timestamp when schedule was last updated
         metadata: Additional metadata for the schedule
+        func: Optional function to execute
+        args: Function arguments
+        kwargs: Function keyword arguments
     """
 
     schedule_id: str
@@ -41,6 +47,11 @@ class ScheduledTask:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # Function execution support
+    func: Optional[Callable] = field(default=None, compare=False, repr=False)
+    args: Tuple[Any, ...] = field(default_factory=tuple, compare=False, repr=False)
+    kwargs: Dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
     @classmethod
     def create(
@@ -124,11 +135,7 @@ class ScheduledTask:
             raise ValueError(f"Invalid cron expression '{self.cron_expression}': {e}") from e
 
     def create_task(self) -> Task:
-        """Convert scheduled task to regular Task for queue processing.
-
-        Returns:
-            Task instance ready for queue processing
-        """
+        """Convert to Task with function support."""
         return Task.create(
             user_id=self.user_id,
             priority=self.priority,
@@ -137,6 +144,9 @@ class ScheduledTask:
                 "__scheduled__": True,
                 "__schedule_id__": self.schedule_id,
             },
+            func=self.func,
+            args=self.args,
+            kwargs=self.kwargs,
         )
 
     def update_after_run(self, run_time: float) -> None:

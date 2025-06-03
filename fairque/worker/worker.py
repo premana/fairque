@@ -21,24 +21,23 @@ class TaskHandler(ABC):
     """Abstract base class for task handlers."""
 
     def process_task(self, task: Task) -> bool:
-        """Process a task. If task has func set, execute it automatically.
-
-        Args:
-            task: Task to process
-
-        Returns:
-            True if task processed successfully, False otherwise
-        """
+        """Process task with strict function resolution handling."""
         if task.func is not None:
             try:
-                result = task()  # Use __call__ method
+                result = task()  # Execute function via __call__
                 logger.debug(f"Function task executed successfully: {task.task_id}, result: {result}")
                 return True
             except Exception as e:
                 logger.error(f"Function execution failed for task {task.task_id}: {e}")
                 return False
         else:
-            # Call the custom implementation
+            # Check if this was supposed to be a function task but function resolution failed
+            if task.payload.get("__is_function_task__"):
+                func_meta = task.payload.get("__function_meta__")
+                logger.error(f"Cannot process function task {task.task_id}: function not available {func_meta}")
+                return False  # Fail the task explicitly
+
+            # Regular custom task processing
             return self._process_task(task)
 
     @abstractmethod

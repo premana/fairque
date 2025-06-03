@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import logging
 import os
 import time
 import uuid
@@ -10,6 +11,8 @@ from enum import IntEnum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fairque.core.exceptions import TaskSerializationError
+
+logger = logging.getLogger(__name__)
 
 
 class Priority(IntEnum):
@@ -228,25 +231,37 @@ class Task:
 
     # Optimized serialization methods
     def to_redis_dict(self) -> Dict[str, str]:
-        """Redis storage optimized dictionary (minimized JSON encoding).
-
-        Returns:
-            Dictionary with string keys and values for Redis storage
-        """
-        return {
+        """Redis storage with function metadata embedded in payload."""
+        base_data = {
             "task_id": self.task_id,
             "user_id": self.user_id,
             "priority": str(self.priority.value),  # int as string
-            "payload": json.dumps(self.payload, separators=(",", ":")),  # minimal JSON
             "retry_count": str(self.retry_count),
             "max_retries": str(self.max_retries),
             "created_at": f"{self.created_at:.6f}",  # limited precision
             "execute_after": f"{self.execute_after:.6f}",
         }
 
+        # Embed function metadata in payload
+        if self.func is not None:
+            from fairque.core.function_registry import serialize_function
+            func_meta = serialize_function(self.func)
+            enhanced_payload = {
+                **self.payload,
+                "__function_meta__": func_meta,
+                "__function_args__": list(self.args),  # Convert tuple to list for JSON
+                "__function_kwargs__": self.kwargs,
+                "__is_function_task__": True
+            }
+            base_data["payload"] = json.dumps(enhanced_payload, separators=(",", ":"))
+        else:
+            base_data["payload"] = json.dumps(self.payload, separators=(",", ":"))  # minimal JSON
+
+        return base_data
+
     @classmethod
     def from_redis_dict(cls, data: Dict[str, str]) -> "Task":
-        """Efficiently restore from Redis dictionary.
+        """Restore from Redis with function fallback resolution.
 
         Args:
             data: Dictionary from Redis with string keys and values
@@ -257,19 +272,37 @@ class Task:
         Raises:
             TaskSerializationError: If deserialization fails
         """
-        try:
-            return cls(
-                task_id=data["task_id"],
-                user_id=data["user_id"],
-                priority=Priority(int(data["priority"])),
-                payload=json.loads(data["payload"]),
-                retry_count=int(data["retry_count"]),
-                max_retries=int(data["max_retries"]),
-                created_at=float(data["created_at"]),
-                execute_after=float(data["execute_after"]),
-            )
-        except (KeyError, ValueError, json.JSONDecodeError) as e:
-            raise TaskSerializationError(f"Failed to deserialize task from Redis: {e}") from e
+        payload = json.loads(data["payload"])
+
+        # Create base task instance
+        task = cls(
+            task_id=data["task_id"],
+            user_id=data["user_id"],
+            priority=Priority(int(data["priority"])),
+            payload={k: v for k, v in payload.items()
+                    if not k.startswith("__function")},
+            retry_count=int(data["retry_count"]),
+            max_retries=int(data["max_retries"]),
+            created_at=float(data["created_at"]),
+            execute_after=float(data["execute_after"]),
+        )
+
+        # Restore function if present
+        if payload.get("__is_function_task__"):
+            func_meta = payload.get("__function_meta__")
+            if func_meta:
+                from fairque.core.function_registry import try_deserialize_function
+                func, strategy = try_deserialize_function(func_meta)
+                if func is not None:
+                    task.func = func
+                    task.args = tuple(payload.get("__function_args__", []))
+                    task.kwargs = payload.get("__function_kwargs__", {})
+                    logger.debug(f"Function restored using {strategy}: {func_meta}")
+                else:
+                    logger.warning(f"Failed to restore function: {func_meta}")
+                    # Function task without function - will be handled in TaskHandler
+
+        return task
 
     def to_lua_args(self) -> List[str]:
         """Lua script argument list (optimized for array transmission).

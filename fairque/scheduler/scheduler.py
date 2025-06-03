@@ -136,7 +136,7 @@ class TaskScheduler:
 
         except redis.RedisError as e:
             logger.error(f"Failed to save schedule: {e}")
-            raise RedisConnectionError(f"Failed to save schedule: {e}")
+            raise RedisConnectionError(f"Failed to save schedule: {e}") from e
 
     def update_schedule(
         self,

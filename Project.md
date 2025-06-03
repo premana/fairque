@@ -83,18 +83,18 @@ fairque/
 - [ ] Complete documentation
 
 ## Current Phase
-**Phase 8: Function Execution Support** - ✅ **FUNCTION EXECUTION COMPLETED**
+**Phase 8: Exception-based Function Resolution** - ✅ **FUNCTION FALLBACK SYSTEM COMPLETED**
 
-**Status**: **🎉 TASK FUNCTION EXECUTION SYSTEM COMPLETE 🎉**
+**Status**: **🎉 EXCEPTION-BASED FUNCTION RESOLUTION SYSTEM COMPLETE 🎉**
 
-### Function Execution Features
-- **Task.__call__() Support**: Tasks are now callable for direct function execution
-- **Function Storage**: Tasks can store functions with args and kwargs
-- **Automatic Execution**: TaskHandler automatically executes func if set
-- **@fairque.task Decorator**: Convert functions to task factories
-- **Argument Modification**: Update task arguments dynamically
-- **TaskFactory**: Utility class for creating tasks from any function
-- **Backward Compatibility**: Existing TaskHandler subclasses work unchanged
+### Function Resolution Features
+- **Exception-based Resolution**: Clear failure indication with FunctionResolutionError
+- **Automatic Fallback Strategy**: Import → registry → exception pattern
+- **Function Registry**: Auto-registration via decorators with global registry
+- **Strict Error Handling**: Failed function tasks are explicitly failed in TaskHandler
+- **Task & ScheduledTask Support**: Unified function execution across both systems
+- **Safe Recovery**: try_deserialize_function for graceful handling
+- **Enhanced Logging**: Detailed logs for debugging function resolution issues
 
 ### Performance Testing Details
 - **Queue Throughput Tests**: Single/batch operations, concurrent pushes, work stealing
