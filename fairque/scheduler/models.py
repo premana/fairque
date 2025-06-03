@@ -97,8 +97,8 @@ class ScheduledTask:
             ValueError: If cron expression is invalid
         """
         try:
-            import pytz
-            from croniter import croniter
+            import pytz  # type: ignore
+            from croniter import croniter  # type: ignore
         except ImportError as e:
             raise ImportError(
                 "croniter and pytz are required for scheduling. "
@@ -121,7 +121,7 @@ class ScheduledTask:
             next_dt = cron.get_next(datetime)
             return next_dt.timestamp()
         except (ValueError, TypeError) as e:
-            raise ValueError(f"Invalid cron expression '{self.cron_expression}': {e}")
+            raise ValueError(f"Invalid cron expression '{self.cron_expression}': {e}") from e
 
     def create_task(self) -> Task:
         """Convert scheduled task to regular Task for queue processing.
