@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -105,24 +106,27 @@ class Task:
     @classmethod
     def create(
         cls,
-        user_id: str,
-        priority: Priority,
-        payload: Dict[str, Any],
+        user_id: Optional[str] = None,
+        priority: Priority = Priority.NORMAL,
+        payload: Dict[str, Any] = {},  # noqa: B006
         max_retries: int = 3,
         execute_after: Optional[float] = None,
     ) -> "Task":
         """Create new task with auto-generated UUID and timestamps.
 
         Args:
-            user_id: User identifier
             priority: Task priority
             payload: Task data payload
+            user_id: User identifier
             max_retries: Maximum retry attempts
             execute_after: Timestamp when task should be executed (defaults to now)
 
         Returns:
             New Task instance
         """
+        if user_id is None:
+            user_id = os.environ["USER"]
+            assert user_id, "User ID must be provided or set in environment"
         current_time = time.time()
         return cls(
             task_id=str(uuid.uuid4()),
