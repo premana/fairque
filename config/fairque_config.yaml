@@ -1,0 +1,23 @@
+# fairque_config.yaml
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+
+workers:
+  - id: "worker-001"
+    assigned_users: ["user:1", "user:3", "user:5"]
+    steal_targets: ["user:2", "user:4", "user:6"]
+    poll_interval_seconds: 1.0
+    max_concurrent_tasks: 10
+  - id: "worker-002"
+    assigned_users: ["user:2", "user:4", "user:6"]
+    steal_targets: ["user:1", "user:3", "user:5"]
+    poll_interval_seconds: 1.0
+    max_concurrent_tasks: 10
+
+queue:
+  stats_prefix: "fq"
+  default_max_retries: 3
+  enable_pipeline_optimization: true
+  xcom_ttl_seconds: 3600
