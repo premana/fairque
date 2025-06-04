@@ -1,14 +1,201 @@
-"""Task decorator for converting functions into FairQueue tasks."""
+"""Task decorator for converting functions into FairQueue tasks with XCom support."""
 
 import functools
+import logging
 import os
 import time
-from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, Optional, TypeVar
 
 from fairque.core.function_registry import FunctionRegistry
 from fairque.core.models import Priority, Task
 
 F = TypeVar('F', bound=Callable[..., Any])
+
+logger = logging.getLogger(__name__)
+
+
+def xcom_pull(
+    *,
+    keys: Optional[Dict[str, str]] = None,
+    defaults: Optional[Dict[str, Any]] = None,
+    namespace: Optional[str] = None
+) -> Callable[[F], F]:
+    """Decorator to automatically inject XCom values by key only.
+
+    Args:
+        keys: Mapping of function parameter names to XCom keys
+              e.g., {"input_data": "processed_data", "config": "task_config"}
+        defaults: Default values for XCom keys if not found
+                 e.g., {"config": {"timeout": 30}}
+        namespace: Specific namespace to pull from
+
+    Usage:
+        @xcom_pull(
+            keys={"input_data": "processed_data", "config": "task_config"},
+            defaults={"config": {"timeout": 30}},
+            namespace="processing"
+        )
+        def my_function(input_data, config, other_param):
+            # input_data will be injected from XCom key "processed_data"
+            # config will be injected from XCom key "task_config" with default
+            # other_param remains as normal parameter
+            pass
+    """
+    def decorator(func: F) -> F:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Check if this is being called from a Task with XCom manager
+            task = None
+            if args and hasattr(args[0], '_xcom_manager') and hasattr(args[0], 'task_id'):
+                task = args[0]  # First argument is the Task instance
+
+            if task and task._xcom_manager and keys:
+                # Inject XCom values into kwargs
+                for param_name, xcom_key in keys.items():
+                    if param_name not in kwargs:  # Don't override existing kwargs
+                        try:
+                            # Use specified namespace or task's default namespace
+                            xcom_value = task.xcom_pull(xcom_key, namespace=namespace)
+                            kwargs[param_name] = xcom_value
+                            ns_info = f"namespace={namespace}" if namespace else f"namespace={task.xcom_namespace}"
+                            logger.debug(f"Injected XCom: {param_name}={xcom_value} from {xcom_key}, {ns_info}")
+                        except KeyError:
+                            if defaults and param_name in defaults:
+                                kwargs[param_name] = defaults[param_name]
+                                logger.debug(f"Used default value for {param_name}: {defaults[param_name]}")
+                            else:
+                                logger.warning(f"XCom key not found: {xcom_key}")
+
+            return func(*args, **kwargs)
+
+        # Store metadata on the function
+        wrapper._xcom_pull_config = {
+            'keys': keys or {},
+            'defaults': defaults or {},
+            'namespace': namespace
+        }
+
+        return wrapper
+    return decorator
+
+
+def xcom_push(
+    key: str,
+    ttl_seconds: int = 3600,
+    namespace: Optional[str] = None,
+    condition: Optional[Callable[[Any], bool]] = None
+) -> Callable[[F], F]:
+    """Decorator to automatically save function return value to XCom.
+
+    Args:
+        key: XCom key name to store the return value
+        ttl_seconds: TTL in seconds (default=3600, 0=no TTL, >0=specific TTL)
+        namespace: Custom namespace (if None, use task's namespace)
+        condition: Optional condition function to determine if value should be stored
+
+    Usage:
+        @xcom_push("calculation_result", ttl_seconds=3600)
+        def calculate_data():
+            return 42  # Will be stored in XCom with key "calculation_result"
+
+        @xcom_push("positive_result", condition=lambda x: x > 0)
+        def maybe_positive():
+            return -1  # Won't be stored because condition fails
+    """
+    def decorator(func: F) -> F:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            result = func(*args, **kwargs)
+
+            # Check if this is being called from a Task with XCom manager
+            task = None
+            if args and hasattr(args[0], '_xcom_manager') and hasattr(args[0], 'task_id'):
+                task = args[0]  # First argument is the Task instance
+
+            if task and task._xcom_manager:
+                # Check condition if provided
+                should_store = True
+                if condition:
+                    try:
+                        should_store = condition(result)
+                    except Exception as e:
+                        logger.warning(f"XCom push condition failed: {e}")
+                        should_store = False
+
+                if should_store:
+                    try:
+                        task.xcom_push(key, result, ttl_seconds=ttl_seconds, namespace=namespace)
+                        ns_info = f"namespace={namespace}" if namespace else f"namespace={task.xcom_namespace}"
+                        ttl_info = "no TTL" if ttl_seconds == 0 else f"TTL {ttl_seconds}s"
+                        logger.debug(f"Auto-pushed to XCom: key={key}, {ns_info}, {ttl_info}")
+                    except Exception as e:
+                        logger.error(f"Failed to auto-push to XCom: {e}")
+
+            return result
+
+        # Store metadata on the function
+        wrapper._xcom_push_config = {
+            'key': key,
+            'ttl_seconds': ttl_seconds,
+            'namespace': namespace,
+            'condition': condition
+        }
+
+        return wrapper
+    return decorator
+
+
+def xcom_task(
+    push_key: Optional[str] = None,
+    pull_keys: Optional[Dict[str, str]] = None,
+    pull_defaults: Optional[Dict[str, Any]] = None,
+    ttl_seconds: int = 3600,
+    namespace: Optional[str] = None
+) -> Callable[[F], F]:
+    """Combined decorator for XCom pull and push functionality.
+
+    Args:
+        push_key: XCom key to store return value
+        pull_keys: Mapping of function parameters to XCom keys for injection
+        pull_defaults: Default values for XCom keys if not found
+        ttl_seconds: TTL in seconds (default=3600, 0=no TTL, >0=specific TTL)
+        namespace: Custom namespace for this task
+
+    Usage:
+        @xcom_task(
+            push_key="final_result",
+            pull_keys={"input_data": "raw_data", "config": "settings"},
+            pull_defaults={"config": {"timeout": 30}},
+            ttl_seconds=3600,
+            namespace="my_workflow"
+        )
+        def process_data(input_data, config, multiplier=2):
+            return input_data * multiplier * config.get("factor", 1)
+    """
+    def decorator(func: F) -> F:
+        # Apply pull decorator if pull_keys specified
+        if pull_keys:
+            func = xcom_pull(
+                keys=pull_keys,
+                defaults=pull_defaults,
+                namespace=namespace
+            )(func)
+
+        # Apply push decorator if push_key specified
+        if push_key:
+            func = xcom_push(push_key, ttl_seconds=ttl_seconds, namespace=namespace)(func)
+
+        # Store combined metadata
+        func._xcom_task_config = {
+            'push_key': push_key,
+            'pull_keys': pull_keys or {},
+            'pull_defaults': pull_defaults or {},
+            'ttl_seconds': ttl_seconds,
+            'namespace': namespace
+        }
+
+        return func
+    return decorator
 
 
 def task(
@@ -16,9 +203,16 @@ def task(
     max_retries: int = 3,
     user_id: Optional[str] = None,
     execute_after: Optional[float] = None,
-    payload: Optional[Dict[str, Any]] = None
+    payload: Optional[Dict[str, Any]] = None,
+    # XCom parameters with default namespace
+    enable_xcom: bool = False,
+    push_key: Optional[str] = None,
+    pull_keys: Optional[Dict[str, str]] = None,
+    pull_defaults: Optional[Dict[str, Any]] = None,
+    xcom_ttl_seconds: int = 3600,
+    xcom_namespace: str = "default"
 ) -> Callable[[F], Callable[..., Task]]:
-    """Decorator to convert a function into a FairQueue task factory.
+    """Enhanced task decorator with XCom support.
 
     Args:
         priority: Task priority (default: NORMAL)
@@ -26,39 +220,75 @@ def task(
         user_id: User identifier (default: from environment USER)
         execute_after: Timestamp when task should be executed (default: now)
         payload: Additional task payload data (default: empty dict)
+        enable_xcom: Enable XCom functionality
+        push_key: XCom key to store return value
+        pull_keys: Mapping of function parameters to XCom keys
+        pull_defaults: Default values for XCom keys if not found
+        xcom_ttl_seconds: Default TTL for XCom data
+        xcom_namespace: XCom namespace for data storage
 
     Returns:
         Decorator function that converts a function into a task factory
 
     Example:
-        @fairque.task(max_retries=2)
-        def fib(n):
-            if n <= 1:
-                return 1
-            else:
-                return fib(n - 1) + fib(n - 2)
+        # Standard task without XCom (default)
+        @fairque.task()
+        def simple_task():
+            return "processed"
 
-        # Usage:
-        task_instance = fib(10)  # Returns Task instance
-        result = task_instance()  # Execute function
-        queue.push(task_instance)  # Push to queue
+        # XCom-enabled task (explicit)
+        @fairque.task(
+            enable_xcom=True,
+            push_key="processed_data",
+            pull_keys={"raw_data": "input_data"},
+            xcom_ttl_seconds=3600,
+            xcom_namespace="workflow_a"
+        )
+        def xcom_task(raw_data, multiplier=2):
+            return raw_data * multiplier
     """
     def decorator(func: F) -> Callable[..., Task]:
+        # Apply XCom decorators only if explicitly enabled
+        if enable_xcom:
+            if pull_keys:
+                func = xcom_pull(
+                    keys=pull_keys,
+                    defaults=pull_defaults,
+                    namespace=xcom_namespace
+                )(func)
+
+            if push_key:
+                func = xcom_push(push_key, ttl_seconds=xcom_ttl_seconds, namespace=xcom_namespace)(func)
+
         # Auto-register function for fallback resolution
         registry_name = f"{func.__module__}.{func.__name__}"
         FunctionRegistry.register(registry_name, func)
 
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs) -> Task:
-            # Create task with function reference
-            effective_user_id = user_id or os.environ.get("USER", "unknown")
-            effective_execute_after = execute_after or time.time()
-            effective_payload = payload.copy() if payload else {}
-            effective_payload.update({
-                "function_name": func.__name__,
-                "module": func.__module__,
-            })
+        # Store task metadata
+        func._fairque_task_config = {
+            'priority': priority,
+            'max_retries': max_retries,
+            'user_id': user_id,
+            'execute_after': execute_after,
+            'payload': payload,
+            'xcom_enabled': enable_xcom,
+            'xcom_ttl_seconds': xcom_ttl_seconds,
+            'xcom_namespace': xcom_namespace
+        }
 
+        @functools.wraps(func)
+        def task_factory(*args, **kwargs) -> Task:
+            """Factory function that creates Task instances."""
+            # Determine user_id
+            effective_user_id = user_id or os.environ.get("USER", "unknown")
+
+            # Determine execution time
+            effective_execute_after = execute_after or time.time()
+
+            # Create payload with any additional data
+            effective_payload = payload.copy() if payload else {}
+
+            # Create task with XCom configuration
             return Task.create(
                 user_id=effective_user_id,
                 priority=priority,
@@ -67,118 +297,12 @@ def task(
                 execute_after=effective_execute_after,
                 func=func,
                 args=args,
-                kwargs=kwargs
+                kwargs=kwargs,
+                enable_xcom=enable_xcom,
+                xcom_namespace=xcom_namespace,
+                xcom_ttl_seconds=xcom_ttl_seconds,
+                auto_xcom=True  # Auto-configure from decorators
             )
 
-        # Add metadata to the wrapper
-        wrapper.__fairque_task__ = True
-        wrapper.__fairque_priority__ = priority
-        wrapper.__fairque_max_retries__ = max_retries
-        wrapper.__original_function__ = func
-
-        return wrapper
-
+        return task_factory
     return decorator
-
-
-def is_fairque_task(func: Callable) -> bool:
-    """Check if a function is decorated with @fairque.task.
-
-    Args:
-        func: Function to check
-
-    Returns:
-        True if function is a FairQueue task, False otherwise
-    """
-    return hasattr(func, '__fairque_task__') and func.__fairque_task__
-
-
-def get_task_metadata(func: Callable) -> Dict[str, Any]:
-    """Get metadata from a FairQueue task function.
-
-    Args:
-        func: Function decorated with @fairque.task
-
-    Returns:
-        Dictionary with task metadata
-
-    Raises:
-        ValueError: If function is not a FairQueue task
-    """
-    if not is_fairque_task(func):
-        raise ValueError(f"Function {func.__name__} is not a FairQueue task")
-
-    return {
-        "priority": getattr(func, '__fairque_priority__', Priority.NORMAL),
-        "max_retries": getattr(func, '__fairque_max_retries__', 3),
-        "original_function": getattr(func, '__original_function__', None),
-        "function_name": func.__name__,
-        "module": func.__module__,
-    }
-
-
-class TaskFactory:
-    """Factory class for creating tasks from functions dynamically."""
-
-    @staticmethod
-    def create_task(
-        func: Callable,
-        args: Tuple[Any, ...] = (),
-        kwargs: Dict[str, Any] = {},  # noqa: B006
-        priority: Priority = Priority.NORMAL,
-        max_retries: int = 3,
-        user_id: Optional[str] = None,
-        execute_after: Optional[float] = None,
-        payload: Optional[Dict[str, Any]] = None
-    ) -> Task:
-        """Create a task from any function without using decorator.
-
-        Args:
-            func: Function to convert to task
-            args: Function arguments
-            kwargs: Function keyword arguments
-            priority: Task priority
-            max_retries: Maximum retry attempts
-            user_id: User identifier
-            execute_after: Timestamp when task should be executed
-            payload: Additional task payload data
-
-        Returns:
-            Task instance with function and arguments
-        """
-        if kwargs is None:
-            kwargs = {}
-
-        # Determine user_id
-        effective_user_id = user_id
-        if effective_user_id is None:
-            effective_user_id = os.environ.get("USER", "unknown")
-
-        # Determine execute_after
-        effective_execute_after = execute_after
-        if effective_execute_after is None:
-            effective_execute_after = time.time()
-
-        # Create payload
-        effective_payload = payload.copy() if payload else {}
-        effective_payload.update({
-            "function_name": func.__name__,
-            "module": func.__module__,
-        })
-
-        # Create task
-        return Task.create(
-            user_id=effective_user_id,
-            priority=priority,
-            payload=effective_payload,
-            max_retries=max_retries,
-            execute_after=effective_execute_after,
-            func=func,
-            args=args,
-            kwargs=kwargs
-        )
-
-
-# Convenience aliases
-fairque_task = task
-create_task = TaskFactory.create_task

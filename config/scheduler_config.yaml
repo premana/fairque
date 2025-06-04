@@ -1,0 +1,15 @@
+# Scheduler-specific configuration  
+# This file contains settings specific to scheduler processes
+
+# Scheduler identification
+id: "scheduler-001"
+
+# Scheduling behavior
+check_interval: 60  # seconds
+max_scheduled_tasks: 1000
+timezone: "UTC"
+
+# Distributed locking configuration
+enable_distributed_locking: true
+lock_timeout: 300  # seconds
+lock_renewal_interval: 30  # seconds

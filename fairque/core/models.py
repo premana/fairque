@@ -8,9 +8,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from fairque.core.exceptions import TaskSerializationError
+
+if TYPE_CHECKING:
+    from fairque.core.xcom import XComManager
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +114,16 @@ class Task:
     args: Tuple[Any, ...] = field(default_factory=tuple, compare=False, repr=False)
     kwargs: Dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
+    # XCom configuration
+    enable_xcom: bool = False
+    xcom_push_key: Optional[str] = None
+    xcom_pull_keys: Dict[str, str] = field(default_factory=dict)
+    xcom_ttl_seconds: int = 3600
+    xcom_namespace: str = "default"  # Default namespace
+
+    # XCom manager reference (injected by TaskHandler)
+    _xcom_manager: Optional['XComManager'] = field(default=None, init=False, repr=False, compare=False)
+
     @classmethod
     def create(
         cls,
@@ -122,8 +135,13 @@ class Task:
         func: Optional[Callable] = None,
         args: Tuple[Any, ...] = (),
         kwargs: Dict[str, Any] = {},  # noqa: B006
+        auto_xcom: bool = True,
+        # XCom parameters
+        enable_xcom: bool = False,
+        xcom_namespace: str = "default",
+        xcom_ttl_seconds: int = 3600,
     ) -> "Task":
-        """Create new task with auto-generated UUID and timestamps.
+        """Create new task with auto-generated UUID and XCom support.
 
         Args:
             user_id: User identifier (default: from environment USER)
@@ -134,6 +152,10 @@ class Task:
             func: Optional function to execute
             args: Function arguments
             kwargs: Function keyword arguments
+            auto_xcom: Automatically configure XCom from function decorators
+            enable_xcom: Enable XCom functionality
+            xcom_namespace: XCom namespace for data storage
+            xcom_ttl_seconds: Default TTL for XCom data
 
         Returns:
             New Task instance
@@ -143,7 +165,7 @@ class Task:
             assert user_id, "User ID must be provided or set in environment"
 
         current_time = time.time()
-        return cls(
+        task = cls(
             task_id=str(uuid.uuid4()),
             user_id=user_id,
             priority=priority,
@@ -155,7 +177,16 @@ class Task:
             func=func,
             args=args,
             kwargs=kwargs,
+            enable_xcom=enable_xcom,
+            xcom_namespace=xcom_namespace,
+            xcom_ttl_seconds=xcom_ttl_seconds,
         )
+
+        # Auto-configure XCom from function decorators
+        if auto_xcom and func:
+            task._configure_xcom_from_decorators()
+
+        return task
 
     def is_ready_to_execute(self) -> bool:
         """Check if task is ready to execute based on execute_after timestamp.
@@ -228,6 +259,155 @@ class Task:
             retry_count=self.retry_count + 1,
             execute_after=time.time() + delay,
         )
+
+    # XCom methods
+    def set_xcom_manager(self, xcom_manager: 'XComManager') -> None:
+        """Set XCom manager reference (called by TaskHandler)."""
+        self._xcom_manager = xcom_manager
+
+    def xcom_push(self, key: str, value: Any, ttl_seconds: Optional[int] = None, namespace: Optional[str] = None) -> None:
+        """Push value to XCom with namespace.
+
+        Args:
+            key: XCom key name
+            value: Value to store
+            ttl_seconds: TTL override (if None, use task's xcom_ttl_seconds)
+            namespace: Namespace override (if None, use task's xcom_namespace)
+
+        Raises:
+            RuntimeError: If XCom is not enabled for this task
+        """
+        if not self.enable_xcom:
+            raise RuntimeError("XCom is not enabled for this task. Set enable_xcom=True.")
+
+        if not self._xcom_manager:
+            raise RuntimeError("XCom manager not available. Task must be processed by XCom-enabled TaskHandler.")
+
+        effective_ttl = ttl_seconds if ttl_seconds is not None else self.xcom_ttl_seconds
+        effective_namespace = namespace if namespace is not None else self.xcom_namespace
+
+        self._xcom_manager.push(
+            key=key,
+            value=value,
+            user_id=self.user_id,
+            namespace=effective_namespace,
+            ttl_seconds=effective_ttl
+        )
+
+        ttl_info = "no TTL" if effective_ttl == 0 else f"TTL {effective_ttl}s"
+        logger.debug(f"XCom pushed: key={key}, namespace={effective_namespace}, {ttl_info}")
+
+    def xcom_pull(self, key: str, default: Any = None, namespace: Optional[str] = None) -> Any:
+        """Pull value from XCom by key and namespace.
+
+        Args:
+            key: XCom key name
+            default: Default value if key not found
+            namespace: Specific namespace (if None, use task's namespace)
+
+        Returns:
+            Value from XCom or default
+
+        Raises:
+            RuntimeError: If XCom is not enabled for this task
+        """
+        if not self.enable_xcom:
+            raise RuntimeError("XCom is not enabled for this task. Set enable_xcom=True.")
+
+        if not self._xcom_manager:
+            raise RuntimeError("XCom manager not available. Task must be processed by XCom-enabled TaskHandler.")
+
+        effective_namespace = namespace if namespace is not None else self.xcom_namespace
+
+        try:
+            return self._xcom_manager.pull(key=key, user_id=self.user_id, namespace=effective_namespace)
+        except KeyError:
+            if default is not None:
+                return default
+            raise
+
+    def xcom_pull_from_namespace(self, namespace: Optional[str] = None) -> Dict[str, Any]:
+        """Pull all keys from a namespace.
+
+        Args:
+            namespace: Target namespace (if None, use task's namespace)
+
+        Returns:
+            Dictionary mapping keys to values
+
+        Raises:
+            RuntimeError: If XCom is not enabled for this task
+        """
+        if not self.enable_xcom:
+            raise RuntimeError("XCom is not enabled for this task. Set enable_xcom=True.")
+
+        if not self._xcom_manager:
+            raise RuntimeError("XCom manager not available. Task must be processed by XCom-enabled TaskHandler.")
+
+        effective_namespace = namespace if namespace is not None else self.xcom_namespace
+        return self._xcom_manager.pull_from_namespace(effective_namespace, self.user_id)
+
+    def xcom_clear_namespace(self, namespace: Optional[str] = None) -> int:
+        """Clear all XCom data in a namespace.
+
+        Args:
+            namespace: Target namespace (if None, use task's namespace)
+
+        Returns:
+            Number of entries cleared
+
+        Raises:
+            RuntimeError: If XCom is not enabled for this task
+        """
+        if not self.enable_xcom:
+            raise RuntimeError("XCom is not enabled for this task. Set enable_xcom=True.")
+
+        if not self._xcom_manager:
+            raise RuntimeError("XCom manager not available. Task must be processed by XCom-enabled TaskHandler.")
+
+        effective_namespace = namespace if namespace is not None else self.xcom_namespace
+        return self._xcom_manager.cleanup_namespace(effective_namespace, self.user_id, "manual_clear")
+
+    def _configure_xcom_from_decorators(self) -> None:
+        """Configure XCom settings from function decorators."""
+        if not self.func:
+            return
+
+        # Check for xcom_task decorator (highest priority)
+        if hasattr(self.func, '_xcom_task_config'):
+            config = self.func._xcom_task_config
+            self.enable_xcom = True
+            self.xcom_push_key = config.get('push_key')
+            self.xcom_pull_keys = config.get('pull_keys', {})
+            self.xcom_ttl_seconds = config.get('ttl_seconds', 3600)
+            # Use decorator namespace or keep task's namespace
+            if config.get('namespace'):
+                self.xcom_namespace = config['namespace']
+            logger.debug(f"Configured XCom from @xcom_task decorator: {self.task_id}, namespace={self.xcom_namespace}")
+            return
+
+        # Check for individual decorators
+        has_xcom_config = False
+
+        if hasattr(self.func, '_xcom_push_config'):
+            config = self.func._xcom_push_config
+            self.enable_xcom = True
+            self.xcom_push_key = config.get('key')
+            self.xcom_ttl_seconds = config.get('ttl_seconds', 3600)
+            if config.get('namespace'):
+                self.xcom_namespace = config['namespace']
+            has_xcom_config = True
+
+        if hasattr(self.func, '_xcom_pull_config'):
+            config = self.func._xcom_pull_config
+            self.enable_xcom = True
+            self.xcom_pull_keys.update(config.get('keys', {}))
+            if config.get('namespace'):
+                self.xcom_namespace = config['namespace']
+            has_xcom_config = True
+
+        if has_xcom_config:
+            logger.debug(f"Configured XCom from decorators: {self.task_id}, namespace={self.xcom_namespace}")
 
     # Optimized serialization methods
     def to_redis_dict(self) -> Dict[str, str]:

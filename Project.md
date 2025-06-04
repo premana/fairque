@@ -122,9 +122,59 @@ fairque/
 - **Performance Options**: Choose based on use case and environment
 
 ## Current Phase
-**Phase 5: Testing and Documentation** - ✅ **CORE TESTING COMPLETED** - Comprehensive test suite covering all major functionality.
+**Phase 9: XCom Implementation** - ✅ **XCOM FUNCTIONALITY COMPLETED**
 
-**Status**: **🎉 PRODUCTION-READY CORE SYSTEM COMPLETE 🎉**
+**Status**: **🎉 XCOM (CROSS COMMUNICATION) SYSTEM COMPLETE 🎉**
+
+### XCom Features Implemented
+- **Namespace-based Storage**: Redis-backed XCom with configurable namespaces (default: "default")
+- **TTL Support**: Configurable TTL (default: 1 hour, 0=unlimited) with automatic expiration
+- **Task Integration**: Native XCom methods on Task objects (`xcom_push`, `xcom_pull`, `xcom_clear_namespace`)
+- **Decorator Support**: Automatic injection/storage via `@xcom_pull`, `@xcom_push`, `@xcom_task`
+- **Enhanced Task Decorator**: Full XCom integration in `@fairque.task` decorator
+- **Failure Cleanup**: Automatic XCom cleanup on task failure (TTL for success)
+- **Type Safety**: Full type annotations and proper error handling
+- **Airflow-like API**: Similar interface to Airflow XCom for easy adoption
+
+### XCom Architecture
+- **XComValue**: Data model with namespace, TTL, and metadata
+- **XComManager**: Core Redis operations with namespace-based keys
+- **Task Methods**: `xcom_push()`, `xcom_pull()`, `xcom_pull_from_namespace()`, `xcom_clear_namespace()`
+- **Decorators**: `@xcom_pull`, `@xcom_push`, `@xcom_task` for automatic data flow
+- **Integration**: Seamless integration with existing TaskHandler and Worker systems
+
+### Redis Storage Pattern
+```
+fairque:xcom:{user_id}:{namespace}:{key} = {serialized_xcom_value}
+fairque:xcom:namespace_keys:{user_id}:{namespace} = {key_set}
+```
+
+### Usage Examples
+```python
+# Decorator-based XCom
+@xcom_task(
+    push_key="processed_data",
+    pull_keys={"raw_data": "input_data"},
+    namespace="workflow_001",
+    ttl_seconds=3600
+)
+def process_data(raw_data, multiplier=2):
+    return raw_data * multiplier
+
+# Manual XCom operations
+def manual_task(task: Task):
+    data = task.xcom_pull("input_data", default=[])
+    result = len(data) * 2
+    task.xcom_push("result", result, ttl_seconds=7200)
+    return result
+
+# Task creation with XCom
+task = Task.create(
+    func=process_data,
+    enable_xcom=True,
+    xcom_namespace="my_workflow"
+)
+```
 
 ## Next Steps
 1. Implement core models (Priority, Task, Configuration)

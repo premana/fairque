@@ -9,13 +9,19 @@ This package provides a comprehensive queue system with:
 - Pipeline optimization for high throughput
 - Built-in monitoring and statistics
 - Dual implementation: Synchronous and Asynchronous versions
+- XCom (Cross Communication) for task data exchange
 """
 
 __version__ = "0.1.0"
 __author__ = "Makoto Yui"
 __email__ = "myui@apache.org"
 
-from fairque.core.config import FairQueueConfig, QueueConfig, RedisConfig, WorkerConfig
+from fairque.core.config import (
+    FairQueueConfig,
+    QueueConfig,
+    RedisConfig,
+    WorkerConfig,
+)
 from fairque.core.exceptions import (
     ConfigurationError,
     FairQueueError,
@@ -26,7 +32,8 @@ from fairque.core.exceptions import (
     TaskValidationError,
 )
 from fairque.core.models import DLQEntry, Priority, Task
-from fairque.decorator import TaskFactory, create_task, get_task_metadata, is_fairque_task, task
+from fairque.core.xcom import XComManager, XComValue
+from fairque.decorator import task, xcom_pull, xcom_push, xcom_task
 from fairque.queue.async_queue import AsyncTaskQueue
 from fairque.queue.queue import TaskQueue
 from fairque.worker.async_worker import AsyncTaskHandler, AsyncWorker
@@ -41,6 +48,9 @@ __all__ = [
     "Priority",
     "Task",
     "DLQEntry",
+    # XCom functionality
+    "XComValue",
+    "XComManager",
     # Configuration
     "FairQueueConfig",
     "RedisConfig",
@@ -54,12 +64,11 @@ __all__ = [
     "Worker",
     "AsyncTaskHandler",
     "AsyncWorker",
-    # Task decorators and utilities
+    # Task decorators and XCom decorators
     "task",
-    "create_task",
-    "is_fairque_task",
-    "get_task_metadata",
-    "TaskFactory",
+    "xcom_pull",
+    "xcom_push",
+    "xcom_task",
     # Exceptions
     "FairQueueError",
     "FunctionResolutionError",

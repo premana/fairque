@@ -1,0 +1,34 @@
+# Common configuration shared across all FairQueue processes
+# This file contains Redis connection, logging, and queue settings
+
+# Redis connection configuration
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+  password: null
+  username: null
+  socket_timeout: 5.0
+  socket_connect_timeout: 5.0
+  health_check_interval: 30
+  decode_responses: true
+
+# Logging configuration
+log_level: "INFO"
+log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Queue configuration
+stats_prefix: "fq"
+lua_script_cache_size: 100
+max_retry_attempts: 3
+default_task_timeout: 300.0
+default_max_retries: 3
+
+# Pipeline settings
+enable_pipeline_optimization: true
+pipeline_batch_size: 100
+pipeline_timeout: 5.0
+
+# Performance settings
+queue_cleanup_interval: 3600  # seconds
+stats_aggregation_interval: 300  # seconds

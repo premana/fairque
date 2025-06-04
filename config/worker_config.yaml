@@ -1,0 +1,24 @@
+# Worker-specific configuration
+# This file contains settings specific to worker processes
+
+# Worker identification and assignment
+id: "worker-001"
+
+# User assignment configuration  
+assigned_users:
+  - "user:1"
+  - "user:3"
+  - "user:5"
+
+# Work stealing configuration
+steal_targets:
+  - "user:2"
+  - "user:4"
+  - "user:6"
+  - "user:7"
+
+# Worker behavior settings
+poll_interval_seconds: 1.0
+task_timeout_seconds: 300.0
+max_concurrent_tasks: 10
+graceful_shutdown_timeout: 30.0
