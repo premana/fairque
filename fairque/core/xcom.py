@@ -7,7 +7,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union, cast
 
 import redis
 
@@ -118,17 +118,18 @@ class XComManager:
         else:
             # Search all namespaces for this key (get latest)
             pattern = f"fairque:xcom:{user_id}:*:{key}"
-            keys = self.redis.keys(pattern)
+            keys = cast(List[Union[str, bytes]], self.redis.keys(pattern))
             if not keys:
                 raise KeyError(f"XCom key not found: {key}")
 
             # Get most recent key (assuming namespace contains timestamp or is ordered)
-            redis_key = max(keys)
-            data = self.redis.get(redis_key)
+            redis_key_raw = max(keys)
+            redis_key = redis_key_raw.decode('utf-8') if isinstance(redis_key_raw, bytes) else redis_key_raw
+            data = cast(Optional[Union[str, bytes]], self.redis.get(redis_key))
             if not data:
                 raise KeyError(f"XCom key expired: {key}")
 
-        xcom_data = json.loads(data)
+        xcom_data = json.loads(cast(Union[str, bytes], data))
         return xcom_data["value"]
 
     def pull_from_namespace(self, namespace: str, user_id: str) -> Dict[str, Any]:
@@ -142,7 +143,7 @@ class XComManager:
             Dictionary mapping keys to values
         """
         pattern = f"fairque:xcom:{user_id}:{namespace}:*"
-        keys = self.redis.keys(pattern)
+        keys = cast(List[Union[str, bytes]], self.redis.keys(pattern))
 
         if not keys:
             return {}
@@ -151,14 +152,14 @@ class XComManager:
         for key in keys:
             pipe.get(key)
 
-        values = pipe.execute()
+        values = cast(List[Optional[Union[str, bytes]]], pipe.execute())
         result = {}
 
         for i, key in enumerate(keys):
             if values[i]:
-                key_str = key.decode('utf-8') if isinstance(key, bytes) else key
+                key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
                 xcom_key = key_str.split(':')[-1]  # Extract key part
-                xcom_data = json.loads(values[i])
+                xcom_data = json.loads(cast(Union[str, bytes], values[i]))
                 result[xcom_key] = xcom_data["value"]
 
         return result
@@ -175,7 +176,7 @@ class XComManager:
             Number of entries cleaned up
         """
         pattern = f"fairque:xcom:{user_id}:{namespace}:*"
-        keys = self.redis.keys(pattern)
+        keys = cast(List[Union[str, bytes]], self.redis.keys(pattern))
 
         if not keys:
             return 0
@@ -197,26 +198,26 @@ class XComManager:
     def list_namespaces(self, user_id: str) -> List[str]:
         """List all available namespaces for a user."""
         pattern = f"fairque:xcom:{user_id}:*"
-        keys = self.redis.keys(pattern)
+        keys = cast(List[Union[str, bytes]], self.redis.keys(pattern))
 
         namespaces = set()
         for key in keys:
-            key_str = key.decode('utf-8') if isinstance(key, bytes) else key
+            key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
             parts = key_str.split(':')
             if len(parts) >= 4:
                 namespace = parts[3]  # Extract namespace part
                 namespaces.add(namespace)
 
-        return sorted(list(namespaces))
+        return sorted(namespaces)
 
     def list_keys_in_namespace(self, namespace: str, user_id: str) -> List[str]:
         """List all keys in a specific namespace."""
         pattern = f"fairque:xcom:{user_id}:{namespace}:*"
-        keys = self.redis.keys(pattern)
+        keys = cast(List[Union[str, bytes]], self.redis.keys(pattern))
 
         xcom_keys = []
         for key in keys:
-            key_str = key.decode('utf-8') if isinstance(key, bytes) else key
+            key_str = key.decode('utf-8') if isinstance(key, bytes) else str(key)
             parts = key_str.split(':')
             if len(parts) >= 5:
                 xcom_key = parts[4]  # Extract key part

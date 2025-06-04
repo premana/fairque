@@ -2,7 +2,7 @@
 
 import importlib
 import logging
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from fairque.core.exceptions import FunctionResolutionError
 
@@ -12,16 +12,16 @@ logger = logging.getLogger(__name__)
 class FunctionRegistry:
     """Global function registry for fallback resolution."""
 
-    _registry: Dict[str, Callable] = {}
+    _registry: Dict[str, Callable[..., Any]] = {}
 
     @classmethod
-    def register(cls, name: str, func: Callable) -> None:
+    def register(cls, name: str, func: Callable[..., Any]) -> None:
         """Register function in global registry."""
         cls._registry[name] = func
         logger.debug(f"Registered function: {name}")
 
     @classmethod
-    def get(cls, name: str) -> Optional[Callable]:
+    def get(cls, name: str) -> Optional[Callable[..., Any]]:
         """Get function from registry."""
         return cls._registry.get(name)
 
@@ -31,7 +31,7 @@ class FunctionRegistry:
         cls._registry.clear()
 
 
-def serialize_function(func: Callable) -> Dict[str, str]:
+def serialize_function(func: Callable[..., Any]) -> Dict[str, str]:
     """Serialize function to string reference."""
     return {
         "module": func.__module__,
@@ -40,7 +40,7 @@ def serialize_function(func: Callable) -> Dict[str, str]:
     }
 
 
-def deserialize_function(func_data: Dict[str, str]) -> Tuple[Callable, str]:
+def deserialize_function(func_data: Dict[str, str]) -> Tuple[Callable[..., Any], str]:
     """
     Deserialize function with fallback strategy.
 
@@ -78,7 +78,7 @@ def deserialize_function(func_data: Dict[str, str]) -> Tuple[Callable, str]:
     raise FunctionResolutionError(f"Cannot resolve function: {func_ref}")
 
 
-def try_deserialize_function(func_data: Dict[str, str]) -> Tuple[Optional[Callable], str]:
+def try_deserialize_function(func_data: Dict[str, str]) -> Tuple[Optional[Callable[..., Any]], str]:
     """
     Safe wrapper that returns None instead of raising exception.
     Used when we want to handle failures gracefully.

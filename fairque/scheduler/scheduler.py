@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import redis
+from redis import Redis
 
 from fairque.core.exceptions import RedisConnectionError
 from fairque.core.models import Priority
@@ -56,7 +57,17 @@ class TaskScheduler:
         """
         self.queue = queue
         self.scheduler_id = scheduler_id
-        self.redis = queue.redis
+
+        # TaskScheduler requires a synchronous Redis client
+        # Always create a new sync client to ensure compatibility
+        try:
+            self.redis: Redis = queue.config.create_redis_client()
+            # Test the connection
+            self.redis.ping()
+        except redis.RedisError as e:
+            logger.error(f"Failed to create synchronous Redis client for scheduler: {e}")
+            raise RedisConnectionError(f"Failed to create Redis client: {e}") from e
+
         self.schedules_key = schedules_key
         self.lock_key = lock_key
         self.check_interval = check_interval
@@ -224,8 +235,10 @@ class TaskScheduler:
             RedisConnectionError: If Redis operation fails
         """
         try:
+            # Type assertion: our Redis client is guaranteed to be synchronous
             result = self.redis.hdel(self.schedules_key, schedule_id)
-            if int(result) > 0:
+            assert isinstance(result, int), "Redis operation should return int synchronously"
+            if result > 0:
                 logger.info(f"Removed schedule {schedule_id}")
                 return True
 
@@ -248,8 +261,10 @@ class TaskScheduler:
             RedisConnectionError: If Redis operation fails
         """
         try:
-            data = self.redis.hget(self.schedules_key, schedule_id)
-
+            data_raw = self.redis.hget(self.schedules_key, schedule_id)
+            # Force synchronous behavior by casting the result
+            from typing import cast
+            data = cast(str | None, data_raw)
             if not data:
                 return None
 
@@ -280,12 +295,21 @@ class TaskScheduler:
             RedisConnectionError: If Redis operation fails
         """
         try:
-            all_data = self.redis.hgetall(self.schedules_key)
+            all_data_raw = self.redis.hgetall(self.schedules_key)
+            # Force synchronous behavior by casting the result
+            from typing import cast
+            all_data = cast(dict[str, str], all_data_raw)
             schedules = []
 
+            # Now we can safely iterate over the dictionary
             for schedule_id, data in all_data.items():
                 try:
-                    scheduled_task = ScheduledTask.from_json(data)
+                    # Ensure data is a string
+                    data_str = str(data) if data is not None else ""
+                    if not data_str:
+                        continue
+
+                    scheduled_task = ScheduledTask.from_json(data_str)
 
                     # Apply filters
                     if user_id is not None and scheduled_task.user_id != user_id:
@@ -406,8 +430,10 @@ class TaskScheduler:
                 keys=[self.lock_key],
                 args=[lock_value],
             )
-
-            return result == 1
+            # Cast result to int for comparison
+            from typing import cast
+            result_int = cast(int, result)
+            return result_int == 1
 
         except redis.RedisError as e:
             logger.error(f"Failed to release lock: {e}")
@@ -428,7 +454,7 @@ class TaskScheduler:
             try:
                 # Create and push task to queue
                 task = scheduled_task.create_task()
-                result = self.queue.push(task)
+                self.queue.push(task)
 
                 # Update schedule with last run time
                 scheduled_task.update_after_run(current_time)

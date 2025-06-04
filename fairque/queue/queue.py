@@ -112,7 +112,7 @@ class TaskQueue:
                 })
 
             logger.debug(f"Pushed task {task.task_id} for user {task.user_id} with priority {task.priority}")
-            return response
+            return dict(response)
 
         except json.JSONDecodeError as e:
             raise LuaScriptError("push", {
@@ -212,7 +212,7 @@ class TaskQueue:
                     "operation": "get_stats"
                 })
 
-            return response.get("data", {})
+            return dict(response.get("data", {}))
 
         except json.JSONDecodeError as e:
             raise LuaScriptError("stats", {
@@ -248,7 +248,9 @@ class TaskQueue:
                     "user_id": user_id
                 })
 
-            return response.get("data", {})
+            # Convert to dict[str, int] explicitly
+            data = response.get("data", {})
+            return {str(k): int(v) for k, v in data.items()}
 
         except json.JSONDecodeError as e:
             raise LuaScriptError("stats", {
@@ -291,7 +293,7 @@ class TaskQueue:
                     "user_list": user_list
                 })
 
-            return response.get("data", {})
+            return dict(response.get("data", {}))
 
         except json.JSONDecodeError as e:
             raise LuaScriptError("stats", {
@@ -323,7 +325,7 @@ class TaskQueue:
                     "operation": "get_health"
                 })
 
-            return response.get("data", {})
+            return dict(response.get("data", {}))
 
         except json.JSONDecodeError as e:
             raise LuaScriptError("stats", {

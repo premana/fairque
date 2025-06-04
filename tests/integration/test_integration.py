@@ -14,7 +14,7 @@ class TestTaskHandler(TaskHandler):
         self.failed_tasks = []
         self.processing_time = 0.1  # Simulate processing time
 
-    def process_task(self, task: Task) -> bool:
+    def _process_task(self, task: Task) -> bool:
         """Process a task with simulated work."""
         time.sleep(self.processing_time)
 
@@ -24,6 +24,10 @@ class TestTaskHandler(TaskHandler):
 
         self.processed_tasks.append(task)
         return True
+
+    def process_task(self, task: Task) -> bool:
+        """Process a task with simulated work."""
+        return self._process_task(task)
 
     def on_task_success(self, task: Task, duration: float) -> None:
         """Handle successful task completion."""
@@ -395,7 +399,7 @@ class TestErrorRecovery:
             def __init__(self):
                 self.call_count = 0
 
-            def process_task(self, task: Task) -> bool:
+            def _process_task(self, task: Task) -> bool:
                 self.call_count += 1
 
                 # Raise exception on first call
@@ -408,6 +412,9 @@ class TestErrorRecovery:
 
                 # Success on third call
                 return True
+
+            def process_task(self, task: Task) -> bool:
+                return self._process_task(task)
 
         task_handler = ErrorTaskHandler()
 

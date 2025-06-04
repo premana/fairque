@@ -1,6 +1,14 @@
 """Function task example showing how to use @fairque.task decorator."""
 
-from fairque import FairQueueConfig, Priority, TaskHandler, TaskQueue, task
+from fairque import (
+    FairQueueConfig,
+    Priority,
+    RedisConfig,
+    TaskHandler,
+    TaskQueue,
+    WorkerConfig,
+    task,
+)
 
 
 @task(max_retries=2)
@@ -50,17 +58,17 @@ def main():
     print("=== FairQueue Function Task Example ===\n")
 
     # Create configuration
-    config = FairQueueConfig.create_development()
+    config = FairQueueConfig(redis=RedisConfig(host='localhost', port=6379), workers=[WorkerConfig(), WorkerConfig()])
 
     # Create task handler and queue
-    handler = SimpleTaskHandler()
+    # handler = SimpleTaskHandler()
 
     with TaskQueue(config) as queue:
         # Example 1: Create task with decorator
         print("1. Creating fibonacci task...")
         fib_task = fib(10)
         print(f"   Task ID: {fib_task.task_id}")
-        print(f"   Function: {fib_task.func.__name__}")
+        print(f"   Function: {fib_task.func.__name__ if fib_task.func else 'None'}")
         print(f"   Arguments: {fib_task.args}")
 
         # Execute function directly

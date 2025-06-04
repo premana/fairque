@@ -182,7 +182,7 @@ class Worker:
 
         # Shutdown executor
         if self.executor:
-            self.executor.shutdown(wait=True, timeout=timeout)
+            self.executor.shutdown(wait=True)
             self.executor = None
 
         # Wait for worker thread to finish

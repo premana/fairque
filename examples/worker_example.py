@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class ExampleTaskHandler(TaskHandler):
     """Example task handler for demonstration purposes."""
 
-    def process_task(self, task: Task) -> bool:
+    def _process_task(self, task: Task) -> bool:
         """Process a task based on its payload.
 
         Args:
@@ -60,6 +60,7 @@ class ExampleTaskHandler(TaskHandler):
         time.sleep(0.5)
 
         # Simulate success/failure based on order ID
+        assert order_id is not None, "Order ID is required"
         success = (order_id % 10) != 0  # 90% success rate
 
         if success:
@@ -208,15 +209,15 @@ def main() -> None:
     )
 
     # Override some settings for demo
-    config.worker_conf.max_concurrent_tasks = 3
-    config.worker_conf.poll_interval_seconds = 1.0
-    config.worker_conf.task_timeout_seconds = 10.0
+    config.worker.max_concurrent_tasks = 3
+    config.worker.poll_interval_seconds = 1.0
+    config.worker.task_timeout_seconds = 10.0
 
     logger.info("=== FairQueue Worker Example ===")
-    logger.info(f"Worker ID: {config.worker_conf.id}")
-    logger.info(f"Assigned users: {config.worker_conf.assigned_users}")
-    logger.info(f"Steal targets: {config.worker_conf.steal_targets}")
-    logger.info(f"Max concurrent tasks: {config.worker_conf.max_concurrent_tasks}")
+    logger.info(f"Worker ID: {config.worker.id}")
+    logger.info(f"Assigned users: {config.worker.assigned_users}")
+    logger.info(f"Steal targets: {config.worker.steal_targets}")
+    logger.info(f"Max concurrent tasks: {config.worker.max_concurrent_tasks}")
 
     # Create task handler and worker
     task_handler = ExampleTaskHandler()

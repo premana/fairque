@@ -5,8 +5,8 @@ import logging
 import time
 from datetime import datetime
 
-from fairque.core.config import FairQueueConfig
-from fairque.core.models import Priority
+from fairque.core.config import FairQueueConfig, RedisConfig, WorkerConfig
+from fairque.core.models import Priority, Task
 from fairque.queue.queue import TaskQueue
 from fairque.scheduler import TaskScheduler
 from fairque.worker import TaskHandler, Worker
@@ -23,14 +23,14 @@ logger = logging.getLogger(__name__)
 class ExampleTaskHandler(TaskHandler):
     """Example task handler that logs task information."""
 
-    def process(self, task_id: str, user_id: str, payload: dict) -> bool:
+    def _process_task(self, task: Task) -> bool:
         """Process a task."""
-        logger.info(f"Processing task {task_id} for user {user_id}")
-        logger.info(f"Payload: {json.dumps(payload, indent=2)}")
+        logger.info(f"Processing task {task.task_id} for user {task.user_id}")
+        logger.info(f"Payload: {json.dumps(task.payload, indent=2)}")
 
         # Check if this is a scheduled task
-        if payload.get("__scheduled__"):
-            logger.info(f"This is a scheduled task from schedule: {payload.get('__schedule_id__')}")
+        if task.payload.get("__scheduled__"):
+            logger.info(f"This is a scheduled task from schedule: {task.payload.get('__schedule_id__')}")
 
         # Simulate work
         time.sleep(1)
@@ -42,7 +42,10 @@ class ExampleTaskHandler(TaskHandler):
 def main():
     """Main example function."""
     # Create configuration
-    config = FairQueueConfig()
+    config = FairQueueConfig(
+        redis=RedisConfig(host="localhost", port=6379, db=0),
+        workers=[WorkerConfig()]
+    )
 
     # Create FairQueue instance
     queue = TaskQueue(config)

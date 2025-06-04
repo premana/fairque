@@ -81,8 +81,8 @@ class AsyncWorker:
         # Worker state
         self.is_running = False
         self.is_stopping = False
-        self.worker_task: Optional[asyncio.Task] = None
-        self.active_tasks: Set[asyncio.Task] = set()
+        self.worker_task: Optional[asyncio.Task[None]] = None
+        self.active_tasks: Set[asyncio.Task[Any]] = set()
 
         # Processing statistics
         self.stats = {
@@ -333,7 +333,7 @@ class AsyncWorker:
             logger.warning(f"Task {task.task_id} timed out after {self.config.worker.task_timeout_seconds}s")
             raise
 
-    async def _task_completed(self, task: Task, processing_task: asyncio.Task) -> None:
+    async def _task_completed(self, task: Task, processing_task: asyncio.Task[Any]) -> None:
         """Handle async task completion.
 
         Args:

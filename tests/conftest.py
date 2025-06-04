@@ -26,7 +26,6 @@ def worker_config() -> WorkerConfig:
     return WorkerConfig(
         id="test-worker",
         assigned_users=["test:user:1", "test:user:2"],
-        steal_targets=["test:user:3", "test:user:4"],
         poll_interval_seconds=0.1,  # Fast polling for tests
         task_timeout_seconds=5.0,
         max_concurrent_tasks=2,
@@ -60,7 +59,7 @@ def fairqueue_config(
     """Complete FairQueue configuration for tests."""
     return FairQueueConfig(
         redis=redis_config,
-        worker=worker_config,
+        workers=[worker_config],
         queue=queue_config
     )
 

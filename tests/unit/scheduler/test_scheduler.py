@@ -109,6 +109,8 @@ class TestScheduledTask(unittest.TestCase):
         scheduled_task.update_after_run(run_time)
 
         assert scheduled_task.last_run == run_time
+        assert scheduled_task.next_run is not None
+        assert original_next_run is not None
         assert scheduled_task.next_run > original_next_run
         assert scheduled_task.updated_at >= run_time
 

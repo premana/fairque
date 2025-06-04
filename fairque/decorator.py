@@ -43,7 +43,7 @@ def xcom_pull(
     """
     def decorator(func: F) -> F:
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             # Check if this is being called from a Task with XCom manager
             task = None
             if args and hasattr(args[0], '_xcom_manager') and hasattr(args[0], 'task_id'):
@@ -69,13 +69,13 @@ def xcom_pull(
             return func(*args, **kwargs)
 
         # Store metadata on the function
-        wrapper._xcom_pull_config = {
+        wrapper._xcom_pull_config = {  # type: ignore
             'keys': keys or {},
             'defaults': defaults or {},
             'namespace': namespace
         }
 
-        return wrapper
+        return wrapper  # type: ignore
     return decorator
 
 
@@ -104,7 +104,7 @@ def xcom_push(
     """
     def decorator(func: F) -> F:
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             result = func(*args, **kwargs)
 
             # Check if this is being called from a Task with XCom manager
@@ -134,14 +134,14 @@ def xcom_push(
             return result
 
         # Store metadata on the function
-        wrapper._xcom_push_config = {
+        wrapper._xcom_push_config = {  # type: ignore
             'key': key,
             'ttl_seconds': ttl_seconds,
             'namespace': namespace,
             'condition': condition
         }
 
-        return wrapper
+        return wrapper  # type: ignore
     return decorator
 
 
@@ -186,7 +186,7 @@ def xcom_task(
             func = xcom_push(push_key, ttl_seconds=ttl_seconds, namespace=namespace)(func)
 
         # Store combined metadata
-        func._xcom_task_config = {
+        func._xcom_task_config = {  # type: ignore
             'push_key': push_key,
             'pull_keys': pull_keys or {},
             'pull_defaults': pull_defaults or {},
@@ -211,7 +211,7 @@ def task(
     pull_defaults: Optional[Dict[str, Any]] = None,
     xcom_ttl_seconds: int = 3600,
     xcom_namespace: str = "default"
-) -> Callable[[F], Callable[..., Task]]:
+) -> Callable[[Callable[..., Any]], Callable[..., Task]]:
     """Enhanced task decorator with XCom support.
 
     Args:
@@ -247,7 +247,7 @@ def task(
         def xcom_task(raw_data, multiplier=2):
             return raw_data * multiplier
     """
-    def decorator(func: F) -> Callable[..., Task]:
+    def decorator(func: Callable[..., Any]) -> Callable[..., Task]:
         # Apply XCom decorators only if explicitly enabled
         if enable_xcom:
             if pull_keys:
@@ -265,7 +265,7 @@ def task(
         FunctionRegistry.register(registry_name, func)
 
         # Store task metadata
-        func._fairque_task_config = {
+        func._fairque_task_config = {  # type: ignore
             'priority': priority,
             'max_retries': max_retries,
             'user_id': user_id,
@@ -277,7 +277,7 @@ def task(
         }
 
         @functools.wraps(func)
-        def task_factory(*args, **kwargs) -> Task:
+        def task_factory(*args: Any, **kwargs: Any) -> Task:
             """Factory function that creates Task instances."""
             # Determine user_id
             effective_user_id = user_id or os.environ.get("USER", "unknown")

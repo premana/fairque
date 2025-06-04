@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 import yaml
 from redis import Redis
@@ -23,6 +23,17 @@ class RedisConfig:
     socket_connect_timeout: float = 5.0
     health_check_interval: int = 30
     decode_responses: bool = True
+
+    # SSL configuration
+    ssl: bool = False
+    ssl_cert_reqs: Optional[str] = None
+    ssl_ca_certs: Optional[str] = None
+    ssl_certfile: Optional[str] = None
+    ssl_keyfile: Optional[str] = None
+
+    # Connection pool configuration
+    max_connections: Optional[int] = None
+    retry_on_timeout: bool = False
 
     def validate(self) -> None:
         """Validate Redis configuration parameters.
@@ -55,7 +66,7 @@ class RedisConfig:
             Configured Redis client instance
         """
         self.validate()
-        return Redis(
+        return cast(Redis, Redis(
             host=self.host,
             port=self.port,
             db=self.db,
@@ -65,7 +76,7 @@ class RedisConfig:
             socket_connect_timeout=self.socket_connect_timeout,
             health_check_interval=self.health_check_interval,
             decode_responses=self.decode_responses,
-        )
+        ))
 
 
 @dataclass
@@ -295,7 +306,7 @@ class SchedulerConfig:
 
 # Configuration loading functions
 
-def _load_config_file(filename: str, config_dir: Optional[Path] = None) -> Dict:
+def _load_config_file(filename: str, config_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Load configuration from YAML file.
 
     Args:
@@ -324,7 +335,7 @@ def _load_config_file(filename: str, config_dir: Optional[Path] = None) -> Dict:
         raise ConfigurationError(f"Failed to load configuration from {file_path}: {e}") from e
 
 
-def _merge_configs(base: Dict, override: Dict) -> Dict:
+def _merge_configs(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """Deep merge two configuration dictionaries.
 
     Args:
@@ -528,15 +539,219 @@ class QueueConfig:
 
 @dataclass
 class FairQueueConfig:
-    """Unified configuration class (legacy support)."""
+    """Unified configuration class supporting multiple workers."""
 
     redis: RedisConfig
-    worker: WorkerConfig
+    workers: List[WorkerConfig]
     queue: QueueConfig = field(default_factory=QueueConfig)
+
+    def __post_init__(self) -> None:
+        """Validate configuration after initialization.
+
+        Raises:
+            ConfigurationError: If configuration is invalid
+        """
+        self.validate_all()
+
+    def validate_workers(self) -> None:
+        """Validate worker configurations for multi-worker setup.
+
+        Raises:
+            ConfigurationError: If worker configuration is invalid
+        """
+        if not self.workers:
+            raise ConfigurationError("At least one worker must be configured")
+
+        # Check for duplicate worker IDs
+        worker_ids = [w.id for w in self.workers]
+        if len(worker_ids) != len(set(worker_ids)):
+            duplicates = [wid for wid in set(worker_ids) if worker_ids.count(wid) > 1]
+            raise ConfigurationError(f"Duplicate worker IDs found: {duplicates}")
+
+        # Check for duplicate assigned users across workers
+        all_assigned = []
+        for worker in self.workers:
+            all_assigned.extend(worker.assigned_users)
+
+        if len(all_assigned) != len(set(all_assigned)):
+            duplicates = [uid for uid in set(all_assigned) if all_assigned.count(uid) > 1]
+            raise ConfigurationError(f"Users assigned to multiple workers: {duplicates}")
+
+    def get_worker_by_id(self, worker_id: str) -> Optional[WorkerConfig]:
+        """Get worker configuration by ID.
+
+        Args:
+            worker_id: Worker ID to search for
+
+        Returns:
+            WorkerConfig if found, None otherwise
+        """
+        return next((w for w in self.workers if w.id == worker_id), None)
+
+    def get_all_users(self) -> List[str]:
+        """Get all users covered by all workers (assigned + steal targets).
+
+        Returns:
+            Sorted list of all unique user IDs covered by workers
+        """
+        all_users = set()
+        for worker in self.workers:
+            all_users.update(worker.get_all_users())
+        return sorted(all_users)
+
+    def get_coverage_info(self) -> Dict[str, Any]:
+        """Get worker coverage statistics.
+
+        Returns:
+            Dictionary containing coverage information and statistics
+        """
+        total_assigned = sum(len(w.assigned_users) for w in self.workers)
+        total_steal_targets = sum(len(w.steal_targets) for w in self.workers)
+        unique_users = len(self.get_all_users())
+
+        return {
+            "total_workers": len(self.workers),
+            "total_assigned_users": total_assigned,
+            "total_steal_targets": total_steal_targets,
+            "unique_users_covered": unique_users,
+            "worker_details": [
+                {
+                    "id": w.id,
+                    "assigned_count": len(w.assigned_users),
+                    "steal_targets_count": len(w.steal_targets),
+                    "total_users": len(w.get_all_users())
+                }
+                for w in self.workers
+            ]
+        }
+
+    # Legacy property for backward compatibility
+    @property
+    def worker(self) -> WorkerConfig:
+        """Legacy property for single worker access (backward compatibility).
+
+        Returns:
+            Single WorkerConfig when only one worker is configured
+
+        Raises:
+            ConfigurationError: If multiple workers are configured
+        """
+        if len(self.workers) != 1:
+            raise ConfigurationError(
+                f"Cannot access single worker when {len(self.workers)} workers are configured. "
+                "Use 'workers' property or 'get_worker_by_id()' method instead."
+            )
+        return self.workers[0]
+
+    @worker.setter
+    def worker(self, value: WorkerConfig) -> None:
+        """Legacy setter for single worker (backward compatibility).
+
+        Args:
+            value: WorkerConfig to set as the single worker
+        """
+        self.workers = [value]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FairQueueConfig":
+        """Create FairQueueConfig from dictionary data.
+
+        Supports both single worker (legacy) and multi-worker configurations.
+
+        Args:
+            data: Dictionary containing configuration data
+
+        Returns:
+            FairQueueConfig instance created from dictionary
+
+        Raises:
+            ConfigurationError: If dictionary structure is invalid
+
+        Examples:
+            # Single worker (legacy format)
+            config_dict = {
+                "redis": {"host": "localhost", "port": 6379},
+                "worker": {
+                    "id": "worker1",
+                    "assigned_users": ["user1", "user2"]
+                },
+                "queue": {"stats_prefix": "fq"}
+            }
+            config = FairQueueConfig.from_dict(config_dict)
+
+            # Multiple workers (new format)
+            config_dict = {
+                "redis": {"host": "localhost", "port": 6379},
+                "workers": [
+                    {
+                        "id": "worker1",
+                        "assigned_users": ["user1", "user2"],
+                        "steal_targets": ["user3", "user4"]
+                    },
+                    {
+                        "id": "worker2",
+                        "assigned_users": ["user3", "user4"],
+                        "steal_targets": ["user1", "user2"]
+                    }
+                ],
+                "queue": {"stats_prefix": "fq"}
+            }
+            config = FairQueueConfig.from_dict(config_dict)
+        """
+        if not isinstance(data, dict):
+            raise ConfigurationError("Configuration data must be a dictionary")
+
+        try:
+            # Parse Redis configuration
+            redis_config = RedisConfig(**data.get("redis", {}))
+
+            # Parse Queue configuration
+            queue_config = QueueConfig(**data.get("queue", {}))
+
+            # Parse Worker configuration(s)
+            workers = []
+
+            if "workers" in data and "worker" in data:
+                raise ConfigurationError(
+                    "Cannot specify both 'worker' and 'workers' in configuration. "
+                    "Use 'workers' for multiple workers or 'worker' for single worker (legacy)."
+                )
+            elif "workers" in data:
+                # Multi-worker format
+                workers_data = data["workers"]
+                if not isinstance(workers_data, list):
+                    raise ConfigurationError("'workers' must be a list")
+
+                for i, worker_data in enumerate(workers_data):
+                    if not isinstance(worker_data, dict):
+                        raise ConfigurationError(f"Worker {i} configuration must be a dictionary")
+                    workers.append(WorkerConfig(**worker_data))
+
+            elif "worker" in data:
+                # Single worker format (legacy)
+                worker_data = data["worker"]
+                if not isinstance(worker_data, dict):
+                    raise ConfigurationError("'worker' configuration must be a dictionary")
+                workers.append(WorkerConfig(**worker_data))
+            else:
+                raise ConfigurationError(
+                    "Configuration must contain either 'worker' or 'workers' section"
+                )
+
+            return cls(
+                redis=redis_config,
+                workers=workers,
+                queue=queue_config
+            )
+
+        except TypeError as e:
+            raise ConfigurationError(f"Invalid configuration structure: {e}") from e
 
     @classmethod
     def from_yaml(cls, path: str) -> "FairQueueConfig":
-        """Load unified configuration from single YAML file.
+        """Load configuration from YAML file.
+
+        Supports both single worker and multi-worker configurations.
 
         Args:
             path: Path to YAML configuration file
@@ -556,17 +771,69 @@ class FairQueueConfig:
         if not isinstance(data, dict):
             raise ConfigurationError("Configuration file must contain a YAML dictionary")
 
-        try:
-            return cls(
-                redis=RedisConfig(**data.get("redis", {})),
-                worker=WorkerConfig(**data.get("worker", {})),
-                queue=QueueConfig(**data.get("queue", {})),
-            )
-        except TypeError as e:
-            raise ConfigurationError(f"Invalid configuration structure: {e}") from e
+        return cls.from_dict(data)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert FairQueueConfig to dictionary.
+
+        Always uses multi-worker format with 'workers' array.
+
+        Returns:
+            Dictionary representation of configuration
+        """
+        result = {
+            "redis": {
+                "host": self.redis.host,
+                "port": self.redis.port,
+                "db": self.redis.db,
+                "password": self.redis.password,
+                "username": self.redis.username,
+                "socket_timeout": self.redis.socket_timeout,
+                "socket_connect_timeout": self.redis.socket_connect_timeout,
+                "health_check_interval": self.redis.health_check_interval,
+                "decode_responses": self.redis.decode_responses,
+                "ssl": self.redis.ssl,
+                "ssl_cert_reqs": self.redis.ssl_cert_reqs,
+                "ssl_ca_certs": self.redis.ssl_ca_certs,
+                "ssl_certfile": self.redis.ssl_certfile,
+                "ssl_keyfile": self.redis.ssl_keyfile,
+                "max_connections": self.redis.max_connections,
+                "retry_on_timeout": self.redis.retry_on_timeout
+            },
+            "queue": {
+                "stats_prefix": self.queue.stats_prefix,
+                "lua_script_cache_size": self.queue.lua_script_cache_size,
+                "max_retry_attempts": self.queue.max_retry_attempts,
+                "default_task_timeout": self.queue.default_task_timeout,
+                "default_max_retries": self.queue.default_max_retries,
+                "enable_pipeline_optimization": self.queue.enable_pipeline_optimization,
+                "pipeline_batch_size": self.queue.pipeline_batch_size,
+                "pipeline_timeout": self.queue.pipeline_timeout,
+                "queue_cleanup_interval": self.queue.queue_cleanup_interval,
+                "stats_aggregation_interval": self.queue.stats_aggregation_interval
+            },
+            "workers": []
+        }
+
+        # Add all workers configuration
+        for worker in self.workers:
+            result["workers"].append({
+                "id": worker.id,
+                "assigned_users": worker.assigned_users,
+                "steal_targets": worker.steal_targets,
+                "poll_interval_seconds": worker.poll_interval_seconds,
+                "task_timeout_seconds": worker.task_timeout_seconds,
+                "max_concurrent_tasks": worker.max_concurrent_tasks,
+                "graceful_shutdown_timeout": worker.graceful_shutdown_timeout
+            })
+
+        # Remove None values to keep dict clean
+        return {k: v for k, v in result.items() if v is not None}
 
     def to_yaml(self, path: str) -> None:
-        """Save unified configuration to YAML file.
+        """Save configuration to YAML file.
+
+        Always uses multi-worker format.
 
         Args:
             path: Path where to save YAML configuration file
@@ -574,11 +841,7 @@ class FairQueueConfig:
         Raises:
             ConfigurationError: If YAML saving fails
         """
-        data = {
-            "redis": self.redis.__dict__,
-            "worker": self.worker.__dict__,
-            "queue": self.queue.__dict__,
-        }
+        data = self.to_dict()
 
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -601,14 +864,20 @@ class FairQueueConfig:
             ConfigurationError: If any configuration section is invalid
         """
         self.redis.validate()
-        self.worker.validate()
         self.queue.validate()
+        self.validate_workers()
+
+        # Validate each worker
+        for worker in self.workers:
+            worker.validate()
 
         # Cross-section validation
-        if self.worker.task_timeout_seconds > self.queue.default_task_timeout:
-            raise ConfigurationError(
-                "Worker task_timeout_seconds should not exceed queue default_task_timeout"
-            )
+        for worker in self.workers:
+            if worker.task_timeout_seconds > self.queue.default_task_timeout:
+                raise ConfigurationError(
+                    f"Worker '{worker.id}' task_timeout_seconds should not exceed "
+                    f"queue default_task_timeout"
+                )
 
     @classmethod
     def create_default(
@@ -617,7 +886,7 @@ class FairQueueConfig:
         assigned_users: List[str],
         steal_targets: Optional[List[str]] = None,
     ) -> "FairQueueConfig":
-        """Create default configuration with minimal required parameters.
+        """Create default configuration with single worker (legacy support).
 
         Args:
             worker_id: Unique worker identifier
@@ -625,14 +894,37 @@ class FairQueueConfig:
             steal_targets: List of users this worker can steal from (optional)
 
         Returns:
-            FairQueueConfig with default settings
+            FairQueueConfig with default settings and single worker
         """
         return cls(
             redis=RedisConfig(),
-            worker=WorkerConfig(
+            workers=[WorkerConfig(
                 id=worker_id,
                 assigned_users=assigned_users,
                 steal_targets=steal_targets or [],
-            ),
+            )],
             queue=QueueConfig(),
+        )
+
+    @classmethod
+    def create_multi_worker(
+        cls,
+        workers: List[WorkerConfig],
+        redis_config: Optional[RedisConfig] = None,
+        queue_config: Optional[QueueConfig] = None,
+    ) -> "FairQueueConfig":
+        """Create configuration with multiple workers.
+
+        Args:
+            workers: List of worker configurations
+            redis_config: Redis configuration (optional, uses default if None)
+            queue_config: Queue configuration (optional, uses default if None)
+
+        Returns:
+            FairQueueConfig with multiple workers
+        """
+        return cls(
+            redis=redis_config or RedisConfig(),
+            workers=workers,
+            queue=queue_config or QueueConfig(),
         )

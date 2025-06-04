@@ -13,7 +13,7 @@ class TestFairQueueBasics:
 
     def test_fairqueue_initialization(self, fairqueue: TaskQueue) -> None:
         """Test FairQueue initialization."""
-        assert fairqueue.config.worker_conf.id == "test-worker"
+        assert fairqueue.config.worker.id == "test-worker"
         assert fairqueue.redis.ping()
 
     def test_push_task_success(self, fairqueue: TaskQueue, sample_payload: Dict[str, Any]) -> None:

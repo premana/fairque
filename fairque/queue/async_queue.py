@@ -121,6 +121,7 @@ class AsyncTaskQueue:
             raise TaskSerializationError(f"Failed to serialize task: {e}") from e
 
         # Execute push script
+        result = None
         try:
             result = await self.lua_manager.execute_script("push", args=lua_args)
             response = json.loads(result)
@@ -135,13 +136,13 @@ class AsyncTaskQueue:
                 })
 
             logger.debug(f"Pushed task {task.task_id} for user {task.user_id} with priority {task.priority}")
-            return response
+            return dict(response)
 
         except json.JSONDecodeError as e:
             raise LuaScriptError("push", {
                 "error": "json_decode_error",
                 "details": str(e),
-                "raw_result": str(result)
+                "raw_result": str(result) if result is not None else "N/A"
             }) from e
 
     async def pop(self, user_list: Optional[List[str]] = None) -> Optional[Task]:
@@ -167,6 +168,7 @@ class AsyncTaskQueue:
         # Convert user list to comma-separated string for Lua script
         user_list_str = ",".join(user_list)
 
+        result = None
         try:
             result = await self.lua_manager.execute_script("pop", args=[user_list_str])
             response = json.loads(result)
@@ -209,7 +211,7 @@ class AsyncTaskQueue:
             raise LuaScriptError("pop", {
                 "error": "json_decode_error",
                 "details": str(e),
-                "raw_result": str(result)
+                "raw_result": str(result) if 'result' in locals() else "N/A"
             }) from e
 
     async def get_stats(self) -> Dict[str, Any]:
@@ -221,6 +223,7 @@ class AsyncTaskQueue:
         Raises:
             LuaScriptError: If Lua script execution fails
         """
+        result = None
         try:
             result = await self.lua_manager.execute_script("stats", args=["get_stats"])
             response = json.loads(result)
@@ -234,13 +237,13 @@ class AsyncTaskQueue:
                     "operation": "get_stats"
                 })
 
-            return response.get("data", {})
+            return dict(response.get("data", {}))
 
         except json.JSONDecodeError as e:
             raise LuaScriptError("stats", {
                 "error": "json_decode_error",
                 "details": str(e),
-                "raw_result": str(result)
+                "raw_result": str(result) if 'result' in locals() else "N/A"
             }) from e
 
     async def get_queue_sizes(self, user_id: str) -> Dict[str, int]:
@@ -255,6 +258,7 @@ class AsyncTaskQueue:
         Raises:
             LuaScriptError: If Lua script execution fails
         """
+        result = None
         try:
             result = await self.lua_manager.execute_script("stats", args=["get_queue_sizes", user_id])
             response = json.loads(result)
@@ -269,13 +273,15 @@ class AsyncTaskQueue:
                     "user_id": user_id
                 })
 
-            return response.get("data", {})
+            # Convert to dict[str, int] explicitly
+            data = response.get("data", {})
+            return {str(k): int(v) for k, v in data.items()}
 
         except json.JSONDecodeError as e:
             raise LuaScriptError("stats", {
                 "error": "json_decode_error",
                 "details": str(e),
-                "raw_result": str(result)
+                "raw_result": str(result) if 'result' in locals() else "N/A"
             }) from e
 
     async def get_batch_queue_sizes(self, user_list: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -298,6 +304,7 @@ class AsyncTaskQueue:
 
         user_list_str = ",".join(user_list)
 
+        result = None
         try:
             result = await self.lua_manager.execute_script("stats", args=["get_batch_sizes", user_list_str])
             response = json.loads(result)
@@ -312,13 +319,13 @@ class AsyncTaskQueue:
                     "user_list": user_list
                 })
 
-            return response.get("data", {})
+            return dict(response.get("data", {}))
 
         except json.JSONDecodeError as e:
             raise LuaScriptError("stats", {
                 "error": "json_decode_error",
                 "details": str(e),
-                "raw_result": str(result)
+                "raw_result": str(result) if 'result' in locals() else "N/A"
             }) from e
 
     async def get_health(self) -> Dict[str, Any]:
@@ -330,6 +337,7 @@ class AsyncTaskQueue:
         Raises:
             LuaScriptError: If Lua script execution fails
         """
+        result = None
         try:
             result = await self.lua_manager.execute_script("stats", args=["get_health"])
             response = json.loads(result)
@@ -343,13 +351,13 @@ class AsyncTaskQueue:
                     "operation": "get_health"
                 })
 
-            return response.get("data", {})
+            return dict(response.get("data", {}))
 
         except json.JSONDecodeError as e:
             raise LuaScriptError("stats", {
                 "error": "json_decode_error",
                 "details": str(e),
-                "raw_result": str(result)
+                "raw_result": str(result) if 'result' in locals() else "N/A"
             }) from e
 
     async def push_batch(self, tasks: List[Task]) -> List[Dict[str, Any]]:
@@ -430,7 +438,7 @@ class AsyncTaskQueue:
         try:
             # Delete task hash
             deleted = await self.redis.delete(f"task:{task_id}")
-            return deleted > 0
+            return bool(deleted > 0)
         except redis.RedisError as e:
             logger.error(f"Failed to delete task {task_id}: {e}")
             return False
@@ -455,10 +463,27 @@ class AsyncTaskQueue:
         try:
             async for key in self.redis.scan_iter(match="task:*"):
                 # This is inefficient for large datasets - consider batch operations
-                created_at = await self.redis.hget(key, "created_at")
-                if created_at and float(created_at) < cutoff_time:
-                    await self.redis.delete(key)
-                    cleanup_count += 1
+                try:
+                    created_at_raw = self.redis.hget(key, "created_at")
+                    # Handle both sync and async Redis clients with explicit casting
+                    from typing import cast
+                    if hasattr(created_at_raw, '__await__'):
+                        created_at = await cast(Any, created_at_raw)
+                    else:
+                        created_at = created_at_raw
+
+                    if created_at is not None:
+                        try:
+                            created_at_float = float(str(created_at))
+                            if created_at_float < cutoff_time:
+                                await self.redis.delete(key)
+                                cleanup_count += 1
+                        except (ValueError, TypeError):
+                            # Skip invalid timestamps
+                            continue
+                except Exception:
+                    # Skip problematic keys
+                    continue
 
         except redis.RedisError as e:
             logger.error(f"Error during async cleanup: {e}")

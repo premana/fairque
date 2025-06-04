@@ -49,7 +49,7 @@ class ScheduledTask:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     # Function execution support
-    func: Optional[Callable] = field(default=None, compare=False, repr=False)
+    func: Optional[Callable[..., Any]] = field(default=None, compare=False, repr=False)
     args: Tuple[Any, ...] = field(default_factory=tuple, compare=False, repr=False)
     kwargs: Dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
@@ -130,7 +130,7 @@ class ScheduledTask:
         try:
             cron = croniter(self.cron_expression, base_dt)
             next_dt = cron.get_next(datetime)
-            return next_dt.timestamp()
+            return float(next_dt.timestamp())
         except (ValueError, TypeError) as e:
             raise ValueError(f"Invalid cron expression '{self.cron_expression}': {e}") from e
 

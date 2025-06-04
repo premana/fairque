@@ -110,7 +110,7 @@ class Task:
     execute_after: float = field(default_factory=time.time)
 
     # Function execution support
-    func: Optional[Callable] = field(default=None, compare=False, repr=False)
+    func: Optional[Callable[..., Any]] = field(default=None, compare=False, repr=False)
     args: Tuple[Any, ...] = field(default_factory=tuple, compare=False, repr=False)
     kwargs: Dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
@@ -132,7 +132,7 @@ class Task:
         payload: Dict[str, Any] = {},   # noqa: B006
         max_retries: int = 3,
         execute_after: Optional[float] = None,
-        func: Optional[Callable] = None,
+        func: Optional[Callable[..., Any]] = None,
         args: Tuple[Any, ...] = (),
         kwargs: Dict[str, Any] = {},  # noqa: B006
         auto_xcom: bool = True,
@@ -196,7 +196,7 @@ class Task:
         """
         return time.time() >= self.execute_after
 
-    def __call__(self, *args, **kwargs) -> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Make Task callable. Execute the stored function or update arguments.
 
         Args:
@@ -374,8 +374,8 @@ class Task:
             return
 
         # Check for xcom_task decorator (highest priority)
-        if hasattr(self.func, '_xcom_task_config'):
-            config = self.func._xcom_task_config
+        config = getattr(self.func, '_xcom_task_config', None)
+        if config is not None:
             self.enable_xcom = True
             self.xcom_push_key = config.get('push_key')
             self.xcom_pull_keys = config.get('pull_keys', {})
@@ -389,8 +389,8 @@ class Task:
         # Check for individual decorators
         has_xcom_config = False
 
-        if hasattr(self.func, '_xcom_push_config'):
-            config = self.func._xcom_push_config
+        config = getattr(self.func, '_xcom_push_config', None)
+        if config is not None:
             self.enable_xcom = True
             self.xcom_push_key = config.get('key')
             self.xcom_ttl_seconds = config.get('ttl_seconds', 3600)
@@ -398,8 +398,8 @@ class Task:
                 self.xcom_namespace = config['namespace']
             has_xcom_config = True
 
-        if hasattr(self.func, '_xcom_pull_config'):
-            config = self.func._xcom_pull_config
+        config = getattr(self.func, '_xcom_pull_config', None)
+        if config is not None:
             self.enable_xcom = True
             self.xcom_pull_keys.update(config.get('keys', {}))
             if config.get('namespace'):

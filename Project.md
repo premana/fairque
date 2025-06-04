@@ -122,59 +122,79 @@ fairque/
 - **Performance Options**: Choose based on use case and environment
 
 ## Current Phase
-**Phase 9: XCom Implementation** - ✅ **XCOM FUNCTIONALITY COMPLETED**
+**Phase 10: Multi-Worker Configuration Support** - ✅ **MULTI-WORKER CONFIGURATION COMPLETED**
 
-**Status**: **🎉 XCOM (CROSS COMMUNICATION) SYSTEM COMPLETE 🎉**
+**Status**: **🎉 MULTI-WORKER FAIRQUEUECONFIG SUPPORT COMPLETE 🎉**
 
-### XCom Features Implemented
-- **Namespace-based Storage**: Redis-backed XCom with configurable namespaces (default: "default")
-- **TTL Support**: Configurable TTL (default: 1 hour, 0=unlimited) with automatic expiration
-- **Task Integration**: Native XCom methods on Task objects (`xcom_push`, `xcom_pull`, `xcom_clear_namespace`)
-- **Decorator Support**: Automatic injection/storage via `@xcom_pull`, `@xcom_push`, `@xcom_task`
-- **Enhanced Task Decorator**: Full XCom integration in `@fairque.task` decorator
-- **Failure Cleanup**: Automatic XCom cleanup on task failure (TTL for success)
-- **Type Safety**: Full type annotations and proper error handling
-- **Airflow-like API**: Similar interface to Airflow XCom for easy adoption
+### Multi-Worker Configuration Features
+- **Multiple Worker Support**: FairQueueConfig now accepts multiple WorkerConfig instances via `workers` field
+- **Legacy Compatibility**: Backward-compatible `worker` property for single worker access
+- **from_dict Method**: Supports both legacy single-worker and new multi-worker dictionary formats
+- **to_dict Method**: Always outputs modern multi-worker format with `workers` array
+- **Worker Validation**: Comprehensive validation including duplicate ID checks and user assignment verification
+- **Worker Utilities**: Methods for worker lookup, user coverage analysis, and statistics
+- **YAML Support**: Updated from_yaml and to_yaml methods support both formats
+- **Configuration Factory Methods**: `create_default()` for single worker, `create_multi_worker()` for multiple workers
 
-### XCom Architecture
-- **XComValue**: Data model with namespace, TTL, and metadata
-- **XComManager**: Core Redis operations with namespace-based keys
-- **Task Methods**: `xcom_push()`, `xcom_pull()`, `xcom_pull_from_namespace()`, `xcom_clear_namespace()`
-- **Decorators**: `@xcom_pull`, `@xcom_push`, `@xcom_task` for automatic data flow
-- **Integration**: Seamless integration with existing TaskHandler and Worker systems
-
-### Redis Storage Pattern
-```
-fairque:xcom:{user_id}:{namespace}:{key} = {serialized_xcom_value}
-fairque:xcom:namespace_keys:{user_id}:{namespace} = {key_set}
-```
-
-### Usage Examples
+### Configuration Format Examples
 ```python
-# Decorator-based XCom
-@xcom_task(
-    push_key="processed_data",
-    pull_keys={"raw_data": "input_data"},
-    namespace="workflow_001",
-    ttl_seconds=3600
-)
-def process_data(raw_data, multiplier=2):
-    return raw_data * multiplier
+# Modern multi-worker format
+config = FairQueueConfig.create_multi_worker([
+    WorkerConfig(
+        id="worker1",
+        assigned_users=["user_0", "user_1", "user_2"],
+        steal_targets=["user_3", "user_4"],
+    ),
+    WorkerConfig(
+        id="worker2",
+        assigned_users=["user_3", "user_4"],
+        steal_targets=["user_0", "user_1"],
+    ),
+])
 
-# Manual XCom operations
-def manual_task(task: Task):
-    data = task.xcom_pull("input_data", default=[])
-    result = len(data) * 2
-    task.xcom_push("result", result, ttl_seconds=7200)
-    return result
+# from_dict with multi-worker format
+config_dict = {
+    "redis": {"host": "localhost", "port": 6379, "db": 15},
+    "workers": [
+        {
+            "id": "worker1",
+            "assigned_users": ["user_0", "user_1"],
+            "steal_targets": ["user_2", "user_3"]
+        },
+        {
+            "id": "worker2", 
+            "assigned_users": ["user_2", "user_3"],
+            "steal_targets": ["user_0", "user_1"]
+        }
+    ],
+    "queue": {"stats_prefix": "fq"}
+}
+config = FairQueueConfig.from_dict(config_dict)
 
-# Task creation with XCom
-task = Task.create(
-    func=process_data,
-    enable_xcom=True,
-    xcom_namespace="my_workflow"
+# Legacy single worker support (backward compatible)
+legacy_config = FairQueueConfig.create_default(
+    worker_id="worker1",
+    assigned_users=["user_0", "user_1"],
+    steal_targets=["user_2", "user_3"]
 )
+# Access via legacy property
+worker = legacy_config.worker
 ```
+
+### Multi-Worker Validation and Utilities
+- **Worker ID Validation**: Prevents duplicate worker IDs across configuration
+- **User Assignment Validation**: Ensures no user is assigned to multiple workers
+- **Coverage Analysis**: `get_coverage_info()` provides comprehensive statistics
+- **Worker Lookup**: `get_worker_by_id()` for efficient worker retrieval
+- **User Coverage**: `get_all_users()` returns all users covered by all workers
+- **Cross-validation**: Enhanced validation checks worker timeout vs queue timeout across all workers
+
+### Implementation Details
+- **Enhanced validate_all()**: Now validates all workers and cross-worker constraints
+- **Improved Error Messages**: Worker-specific error messages include worker ID for clarity
+- **Factory Methods**: Type-safe configuration creation with validation
+- **Comprehensive Test Suite**: Full test coverage for all new functionality
+- **Example Code**: Complete multi-worker usage examples in `examples/multi_worker_config_example.py`
 
 ## Next Steps
 1. Implement core models (Priority, Task, Configuration)

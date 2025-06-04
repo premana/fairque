@@ -66,7 +66,7 @@ class TestQueueThroughput:
         num_threads = 4
         tasks_per_thread = 250
 
-        def push_tasks(thread_id: int) -> int:
+        def push_tasks(thread_id: int) -> float:
             """Push tasks from a single thread."""
             tasks = create_test_tasks(
                 tasks_per_thread,
