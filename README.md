@@ -13,6 +13,10 @@ Production-ready fair queue implementation using Redis with work stealing and pr
 - 🛡️ **Production Ready**: Error handling, graceful shutdown, health checks
 - 🔧 **Function Decorators**: @task decorator for seamless function-to-task conversion
 - 📡 **XCom Support**: Cross-task communication with automatic data management
+- 🔄 **Task Dependencies**: Sophisticated dependency management with cycle detection
+- 🔗 **Pipeline Operators**: Airflow-style workflow composition (>>, <<, |)
+- ⏰ **Task Scheduling**: Cron-based task scheduling with distributed coordination
+- 📊 **Task States**: Comprehensive state management (queued, started, deferred, finished, etc.)
 
 ## Quick Start
 
@@ -29,32 +33,26 @@ pip install fairque
 ### Basic Usage with @task Decorator
 
 ```python
-from fairque import task, TaskQueue, FairQueueConfig, Priority, xcom_push, xcom_pull
+from fairque import task, TaskQueue, FairQueueConfig, Priority
 
-# Define tasks using the @task decorator
-@task(priority=Priority.HIGH, max_retries=3)
+# Define tasks using the @task decorator with custom IDs
+@task(task_id="process_order", priority=Priority.HIGH, max_retries=3)
 def process_order(order_id: int, customer_id: str) -> dict:
     """Process customer order."""
     print(f"Processing order {order_id} for customer {customer_id}")
     
-    # Simulate order processing
     result = {
         "order_id": order_id,
         "customer_id": customer_id,
         "status": "processed",
         "total": 99.99
     }
-    
-    # Store result in XCom for other tasks
-    xcom_push("order_result", result)
     return result
 
-@task(priority=Priority.NORMAL)
+@task(task_id="send_confirmation", depends_on=["process_order"])
 def send_confirmation(order_id: int):
     """Send order confirmation email."""
-    # Pull order result from XCom
-    order_data = xcom_pull("order_result")
-    print(f"Sending confirmation for order {order_id}: {order_data}")
+    print(f"Sending confirmation for order {order_id}")
 
 # Create configuration
 config = FairQueueConfig.create_default(
@@ -66,52 +64,115 @@ config = FairQueueConfig.create_default(
 # Create and execute tasks
 with TaskQueue(config) as queue:
     # Create tasks by calling decorated functions
-    order_id = 12345
-    customer_id = "customer@example.com"
-    order_task = process_order(order_id, customer_id)
-    confirmation_task = send_confirmation(order_id)
+    order_task = process_order(12345, "customer@example.com")
+    confirmation_task = send_confirmation(12345)
     
-    # Execute immediately or push to queue
-    result = order_task()  # Execute directly
+    # Execute immediately
+    result = order_task()
     print(f"Order result: {result}")
     
-    # Push to queue for worker processing
-    queue.push(confirmation_task, user_id="user:1")
+    # Or push to queue for worker processing
+    queue.push(order_task)
+    queue.push(confirmation_task)  # Will wait for process_order to complete
     
     # Get queue statistics
     stats = queue.get_stats()
     print(f"Active tasks: {stats.get('tasks_active', 0)}")
 ```
 
+### Pipeline Operators (Airflow-style)
+
+```python
+from fairque import task, TaskQueue, FairQueueConfig
+
+# Define tasks with custom IDs
+@task(task_id="extract")
+def extract_data():
+    return {"records": 1000}
+
+@task(task_id="transform")  
+def transform_data():
+    return {"processed_records": 2000}
+
+@task(task_id="validate")
+def validate_data():
+    return {"validation": "passed"}
+
+@task(task_id="load")
+def load_data():
+    return {"status": "loaded"}
+
+# Create pipelines using operators
+with TaskQueue(config) as queue:
+    # Simple linear pipeline: extract >> transform >> load
+    pipeline = extract_data() >> transform_data() >> load_data()
+    queue.enqueue(pipeline)
+    
+    # Parallel execution: extract >> (transform | validate) >> load
+    parallel_pipeline = extract_data() >> (transform_data() | validate_data()) >> load_data()
+    queue.enqueue(parallel_pipeline)
+    
+    # Reverse operator: load << transform << extract
+    reverse_pipeline = load_data() << transform_data() << extract_data()
+    queue.enqueue(reverse_pipeline)
+```
+
 ### XCom (Cross Communication) Usage
 
 ```python
-from fairque import xcom_task, xcom_push, xcom_pull
+from fairque import xcom_task, Task
 
-@xcom_task("data_processing")
+@xcom_task(push_key="extracted_data", auto_xcom=True)
 def extract_data(source: str) -> dict:
     """Extract data and automatically store in XCom."""
     data = {"source": source, "records": 1000}
-    return data  # Automatically stored in XCom with task key
+    return data  # Automatically stored in XCom
 
-@task()
+@task(task_id="transform", depends_on=["extract"], enable_xcom=True)
 def transform_data():
     """Transform data using XCom."""
     # Pull data from previous task
-    raw_data = xcom_pull("data_processing")
+    raw_data = self.xcom_pull("extracted_data")
     transformed = {
         "processed_records": raw_data["records"] * 2,
         "source": raw_data["source"]
     }
-    # Store transformed data
-    xcom_push("transformed_data", transformed)
+    self.xcom_push("transformed_data", transformed)
     return transformed
 
-@task()
-def load_data():
-    """Load transformed data."""
-    data = xcom_pull("transformed_data")
-    print(f"Loading {data['processed_records']} records from {data['source']}")
+# Create tasks with XCom support
+extract_task = extract_data("database")
+transform_task = transform_data()
+
+# Pipeline with automatic data passing
+pipeline = extract_task >> transform_task
+queue.enqueue(pipeline)
+```
+
+### Task Scheduling
+
+```python
+from fairque.scheduler.scheduler import TaskScheduler
+
+# Create scheduler
+scheduler = TaskScheduler(config)
+
+# Schedule a task with cron expression
+daily_task = Task.create(
+    task_id="daily_report",
+    user_id="system",
+    priority=Priority.HIGH,
+    payload={"report_type": "daily"}
+)
+
+schedule_id = scheduler.add_schedule(
+    cron_expr="0 9 * * *",  # Daily at 9 AM
+    task=daily_task,
+    timezone="UTC"
+)
+
+# Start the scheduler
+scheduler.start()
 ```
 
 ### Worker Usage
@@ -291,23 +352,58 @@ Processing order:
 2. If empty, try steal_targets (round-robin)
 3. For each user: critical queue first, then normal queue
 
-### Function Task System
+### Task Dependencies and States
 
-FairQueue provides a decorator-based system for converting functions into tasks:
+FairQueue provides sophisticated dependency management:
 
 ```python
-@task(priority=Priority.HIGH, max_retries=3)
-def my_function(arg1: str, arg2: int = 10) -> str:
-    return f"Processed {arg1} with {arg2}"
+# Tasks with dependencies
+@task(task_id="step1")
+def first_step():
+    return "data"
 
-# Creates a Task object that can be executed or queued
-task_obj = my_function("data", arg2=20)
+@task(task_id="step2", depends_on=["step1"])
+def second_step():
+    return "processed"
 
-# Execute directly
-result = task_obj()
+# Task states
+from fairque import TaskState
 
-# Or push to queue
-queue.push(task_obj, user_id="user:1")
+# Available states:
+TaskState.QUEUED     # Ready for execution
+TaskState.STARTED    # Currently executing  
+TaskState.DEFERRED   # Waiting for dependencies
+TaskState.FINISHED   # Successfully completed
+TaskState.FAILED     # Execution failed
+TaskState.CANCELED   # Manually canceled
+TaskState.SCHEDULED  # Waiting for execute_after time
+TaskState.STOPPED    # Manually stopped
+```
+
+### Pipeline Operators
+
+Airflow-style workflow composition:
+
+```python
+# Sequential execution: A >> B >> C
+pipeline = extract_data() >> transform_data() >> load_data()
+
+# Parallel execution: A >> (B | C) >> D  
+parallel = extract_data() >> (transform_data() | validate_data()) >> load_data()
+
+# Reverse operator: C << B << A
+reverse = load_data() << transform_data() << extract_data()
+
+# Complex workflows
+complex = (
+    extract_data() >> 
+    (transform_data() | validate_data()) >> 
+    (load_data() | backup_data()) >> 
+    notify_completion()
+)
+
+# Enqueue entire pipeline
+queue.enqueue(complex)
 ```
 
 ### XCom (Cross Communication)
@@ -315,16 +411,32 @@ queue.push(task_obj, user_id="user:1")
 XCom enables data sharing between tasks:
 
 ```python
-# Store data
-xcom_push("my_key", {"data": "value"})
+# Automatic XCom with dependencies
+@xcom_task(push_key="result", auto_xcom=True)
+def producer():
+    return {"data": "value"}
 
-# Retrieve data
-data = xcom_pull("my_key")
+@task(depends_on=["producer"], enable_xcom=True)
+def consumer():
+    data = self.xcom_pull("result")
+    return f"Processed: {data}"
+```
 
-# Automatic XCom storage
-@xcom_task("result_key")
-def compute_data():
-    return {"computed": True}  # Automatically stored in XCom
+### Task Scheduling
+
+Cron-based scheduling with distributed coordination:
+
+```python
+from fairque.scheduler.scheduler import TaskScheduler
+
+scheduler = TaskScheduler(config)
+
+# Schedule tasks
+task = my_task_function()
+scheduler.add_schedule("0 9 * * *", task)  # Daily at 9 AM
+
+# Start scheduler with distributed locking
+scheduler.start()
 ```
 
 ## Development Status

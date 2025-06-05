@@ -27,22 +27,27 @@ This installs the required dependencies: `croniter` and `pytz`.
 from fairque.scheduler import TaskScheduler
 from fairque.core.models import Priority
 
-# Create scheduler with your FairQueue instance
+# Create scheduler with your configuration
 scheduler = TaskScheduler(
-    queue=queue,
+    config=config,
     scheduler_id="scheduler-001",
     check_interval=60,  # Check every minute
 )
 
-# Add a daily task
-schedule_id = scheduler.add_schedule(
-    cron_expr="0 9 * * *",  # Every day at 9 AM
+# Create a task for scheduling
+daily_task = Task.create(
     user_id="user1",
     priority=Priority.NORMAL,
     payload={
         "action": "daily_report",
         "email": "user@example.com",
-    },
+    }
+)
+
+# Add a daily task
+schedule_id = scheduler.add_schedule(
+    cron_expr="0 9 * * *",  # Every day at 9 AM
+    task=daily_task,
     timezone="America/New_York",
 )
 
@@ -69,10 +74,15 @@ schedules = scheduler.list_schedules()
 schedule = scheduler.get_schedule(schedule_id)
 
 # Update a schedule
+updated_task = Task.create(
+    user_id="user1", 
+    priority=Priority.HIGH,
+    payload={"action": "daily_report", "email": "user@example.com"}
+)
 scheduler.update_schedule(
     schedule_id,
     cron_expr="0 10 * * *",  # Change to 10 AM
-    priority=Priority.HIGH,   # Increase priority
+    task=updated_task,        # Updated task with higher priority
 )
 
 # Deactivate a schedule
@@ -88,20 +98,26 @@ Schedules can be created in different timezones:
 
 ```python
 # Schedule in UTC
-scheduler.add_schedule(
-    cron_expr="0 0 * * *",
+utc_task = Task.create(
     user_id="user1",
     priority=Priority.NORMAL,
-    payload={"task": "midnight_utc"},
+    payload={"task": "midnight_utc"}
+)
+scheduler.add_schedule(
+    cron_expr="0 0 * * *",
+    task=utc_task,
     timezone="UTC",
 )
 
 # Schedule in Tokyo time
-scheduler.add_schedule(
-    cron_expr="0 9 * * *",
+tokyo_task = Task.create(
     user_id="user2",
     priority=Priority.NORMAL,
-    payload={"task": "morning_tokyo"},
+    payload={"task": "morning_tokyo"}
+)
+scheduler.add_schedule(
+    cron_expr="0 9 * * *",
+    task=tokyo_task,
     timezone="Asia/Tokyo",
 )
 ```
@@ -115,11 +131,11 @@ The scheduler uses Redis-based distributed locking to ensure only one scheduler 
 # Only one will acquire the lock and process tasks
 
 # Instance 1
-scheduler1 = TaskScheduler(queue, "scheduler-1")
+scheduler1 = TaskScheduler(config, "scheduler-1")
 scheduler1.start()
 
 # Instance 2 (backup)
-scheduler2 = TaskScheduler(queue, "scheduler-2")
+scheduler2 = TaskScheduler(config, "scheduler-2")
 scheduler2.start()
 ```
 
@@ -147,7 +163,7 @@ See `examples/scheduler_example.py` for a complete working example that demonstr
 
 ```python
 scheduler = TaskScheduler(
-    queue=queue,
+    config=config,
     scheduler_id="main-scheduler",
     schedules_key="myapp:schedules",      # Custom Redis key
     lock_key="myapp:scheduler_lock",      # Custom lock key

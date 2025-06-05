@@ -23,6 +23,11 @@ FairQueue is a production-ready fair queue implementation using Redis with work 
 - **Configuration-Based**: No Redis state for user management, fully configurable
 - **Dual Implementation**: Both synchronous and asynchronous versions
 - **Production Ready**: Error handling, graceful shutdown, health checks
+- **Task Dependencies**: Sophisticated dependency management with cycle detection
+- **Pipeline Operators**: Airflow-style workflow composition (>>, <<, |)
+- **Task Scheduling**: Cron-based task scheduling with distributed coordination
+- **XCom Support**: Cross-task communication with automatic data management
+- **Function Decorators**: @task decorator for seamless function-to-task conversion
 
 ## System Architecture
 
@@ -39,6 +44,8 @@ graph TB
         WR[Worker/AsyncWorker]
         SC[TaskScheduler]
         CFG[Configuration System]
+        XC[XCom Manager]
+        PL[Pipeline System]
     end
     
     subgraph "Redis Storage"
@@ -48,6 +55,8 @@ graph TB
         DLQ[Dead Letter Queue]
         ST[Statistics]
         SCH[Scheduled Tasks]
+        XCM[XCom Data]
+        DEP[Task Dependencies]
     end
     
     subgraph "Lua Scripts"
@@ -79,6 +88,11 @@ graph TB
     CFG --> TQ
     CFG --> WR
     CFG --> SC
+    
+    TQ --> XC
+    TQ --> PL
+    XC --> XCM
+    PL --> DEP
 ```
 
 ## Core Components
@@ -98,6 +112,7 @@ classDiagram
         +get_stats() Dict
         +get_health() Dict
         +delete_task(task_id: str) bool
+        +enqueue(executable: Union[Task, Executable]) List[Dict]
     }
     
     class AsyncTaskQueue {
@@ -109,6 +124,7 @@ classDiagram
         +get_stats() Dict
         +get_health() Dict
         +delete_task(task_id: str) bool
+        +enqueue(executable: Union[Task, Executable]) List[Dict]
     }
     
     TaskQueue --> LuaScriptManager
@@ -148,10 +164,11 @@ Manages cron-based task scheduling with distributed locking.
 ```mermaid
 classDiagram
     class TaskScheduler {
+        +FairQueueConfig config
         +TaskQueue queue
         +str scheduler_id
         +Redis redis
-        +add_schedule(cron_expr: str, user_id: str, priority: Priority, payload: Dict) str
+        +add_schedule(cron_expr: str, task: Task, timezone: str, metadata: Dict) str
         +remove_schedule(schedule_id: str) bool
         +update_schedule(schedule_id: str, **kwargs) bool
         +start() void
@@ -161,13 +178,12 @@ classDiagram
     class ScheduledTask {
         +str schedule_id
         +str cron_expression
-        +str user_id
-        +Priority priority
-        +Dict payload
+        +Task task
         +str timezone
         +bool is_active
         +float last_run
         +float next_run
+        +Dict metadata
     }
     
     TaskScheduler --> ScheduledTask
@@ -216,6 +232,74 @@ classDiagram
     FairQueueConfig --> RedisConfig
     FairQueueConfig --> WorkerConfig
     FairQueueConfig --> QueueConfig
+```
+
+### 5. Pipeline System
+
+Airflow-style workflow composition with task dependencies.
+
+```mermaid
+classDiagram
+    class Executable {
+        <<abstract>>
+        +get_tasks() List[Task]
+        +get_task_ids() Set[str]
+        +__rshift__(other) Pipeline
+        +__lshift__(other) Pipeline
+        +__or__(other) ParallelGroup
+    }
+    
+    class TaskWrapper {
+        +Task task
+        +get_tasks() List[Task]
+    }
+    
+    class SequentialGroup {
+        +List[Executable] tasks
+        +expand_dependencies() List[Task]
+    }
+    
+    class ParallelGroup {
+        +List[Executable] tasks
+        +expand_dependencies() List[Task]
+    }
+    
+    class Pipeline {
+        +List[Executable] executables
+        +expand() List[Task]
+    }
+    
+    Executable <|-- TaskWrapper
+    Executable <|-- SequentialGroup
+    Executable <|-- ParallelGroup
+    Executable <|-- Pipeline
+```
+
+### 6. XCom System
+
+Cross-task communication for data sharing.
+
+```mermaid
+classDiagram
+    class XComManager {
+        +Redis redis
+        +push(key: str, value: Any, user_id: str, namespace: str) void
+        +pull(key: str, user_id: str, namespace: str) Any
+        +pull_from_namespace(namespace: str, user_id: str) Dict
+        +cleanup_namespace(namespace: str, user_id: str) int
+    }
+    
+    class Task {
+        +bool enable_xcom
+        +str xcom_namespace
+        +Optional[str] xcom_push_key
+        +Dict[str, str] xcom_pull_keys
+        +bool auto_xcom
+        +xcom_push(key: str, value: Any) void
+        +xcom_pull(key: str, default: Any) Any
+    }
+    
+    Task --> XComManager
 ```
 
 ## Data Flow
@@ -317,6 +401,9 @@ graph TB
         NQ["queue:user:{user_id}:normal<br/>(Sorted Set - Score-based)"]
         DLQ["dlq<br/>(List - Failed tasks)"]
         ST["queue:stats<br/>(Hash - Statistics)"]
+        XC["xcom:{namespace}:{user_id}:{key}<br/>(Hash - XCom data with TTL)"]
+        TK["task:{task_id}<br/>(Hash - Task metadata & dependencies)"]
+        SCH["fairque:schedules<br/>(Hash - Scheduled tasks)"]
     end
     
     subgraph "Priority 6 Tasks"

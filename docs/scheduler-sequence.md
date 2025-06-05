@@ -55,9 +55,9 @@ sequenceDiagram
     participant CR as Croniter
     participant R as Redis
     
-    C->>S: add_schedule(cron_expr, user_id, priority, payload, timezone)
+    C->>S: add_schedule(cron_expr, task, timezone)
     S->>S: validate cron expression
-    S->>ST: ScheduledTask.create(...)
+    S->>ST: ScheduledTask.create(cron_expr, task, timezone)
     ST->>CR: validate cron expression
     CR-->>ST: validation result
     ST->>ST: calculate next_run time
@@ -150,8 +150,8 @@ sequenceDiagram
                 
                 alt Task is due and active
                     ST-->>S: task is due
-                    S->>T: Task.create(user_id, priority, payload)
-                    T-->>S: task created
+                    S->>ST: create_task() (creates task copy with new ID)
+                    ST-->>S: task created
                     S->>Q: push(task)
                     Q-->>S: push result
                     
@@ -196,9 +196,9 @@ sequenceDiagram
     ST->>ST: current_time >= next_run?
     
     alt Task is due
-        S->>T: Task.create(user_id, priority, payload)
-        Note over T: Create task with unique ID
-        T-->>S: task instance
+        S->>ST: create_task() (creates copy of scheduled task with new ID)
+        Note over ST: Create task instance with unique ID
+        ST-->>S: task instance
         
         S->>Q: push(task)
         Q->>R: execute push.lua script
