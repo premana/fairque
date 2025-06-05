@@ -7,15 +7,29 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import IntEnum
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from enum import Enum, IntEnum
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from fairque.core.exceptions import TaskSerializationError
 
 if TYPE_CHECKING:
+    from fairque.core.pipeline import Executable, ParallelGroup, Pipeline
     from fairque.core.xcom import XComManager
 
 logger = logging.getLogger(__name__)
+
+
+class TaskState(str, Enum):
+    """Task execution states for dependency management."""
+
+    QUEUED = "queued"        # Ready for execution
+    STARTED = "started"      # Currently executing
+    DEFERRED = "deferred"    # Waiting for dependencies
+    FINISHED = "finished"    # Successfully completed
+    FAILED = "failed"        # Execution failed
+    CANCELED = "canceled"    # Manually canceled
+    SCHEDULED = "scheduled"  # Waiting for execute_after time
+    STOPPED = "stopped"      # Manually stopped
 
 
 class Priority(IntEnum):
@@ -96,6 +110,48 @@ def calculate_score(task: "Task") -> float:
     return task.created_at + (priority_weight * elapsed_time)
 
 
+def detect_dependency_cycle(task_dependencies: Dict[str, List[str]], new_task_id: str, dependencies: List[str]) -> bool:
+    """Detect if adding dependencies would create a cycle.
+
+    Args:
+        task_dependencies: Dict mapping task_id to its dependencies
+        new_task_id: ID of the new task being added
+        dependencies: List of task IDs the new task depends on
+
+    Returns:
+        True if adding dependencies would create a cycle, False otherwise
+    """
+    # Create temporary graph including the new task
+    temp_graph = task_dependencies.copy()
+    temp_graph[new_task_id] = dependencies.copy()
+
+    def has_cycle_dfs(node: str, visited: Set[str], rec_stack: Set[str]) -> bool:
+        """DFS to detect cycles in directed graph."""
+        visited.add(node)
+        rec_stack.add(node)
+
+        # Check all dependencies of current node
+        for dep in temp_graph.get(node, []):
+            if dep not in visited:
+                if has_cycle_dfs(dep, visited, rec_stack):
+                    return True
+            elif dep in rec_stack:
+                return True
+
+        rec_stack.remove(node)
+        return False
+
+    visited: Set[str] = set()
+
+    # Check for cycles starting from any unvisited node
+    for task_id in temp_graph:
+        if task_id not in visited:
+            if has_cycle_dfs(task_id, visited, set()):
+                return True
+
+    return False
+
+
 @dataclass
 class Task:
     """Optimized Task model with efficient serialization and function execution support."""
@@ -121,6 +177,15 @@ class Task:
     xcom_ttl_seconds: int = 3600
     xcom_namespace: str = "default"  # Default namespace
 
+    # Dependency management
+    depends_on: List[str] = field(default_factory=list)  # Task IDs this task depends on
+    dependents: List[str] = field(default_factory=list)  # Task IDs that depend on this task
+    state: TaskState = TaskState.QUEUED
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    result: Optional[Any] = field(default=None, repr=False, compare=False)
+    auto_xcom: bool = False  # Automatically pass result to dependents via XCom
+
     # XCom manager reference (injected by TaskHandler)
     _xcom_manager: Optional['XComManager'] = field(default=None, init=False, repr=False, compare=False)
 
@@ -128,6 +193,7 @@ class Task:
     def create(
         cls,
         user_id: Optional[str] = None,
+        task_id: Optional[str] = None,
         priority: Priority = Priority.NORMAL,
         payload: Dict[str, Any] = {},   # noqa: B006
         max_retries: int = 3,
@@ -135,16 +201,20 @@ class Task:
         func: Optional[Callable[..., Any]] = None,
         args: Tuple[Any, ...] = (),
         kwargs: Dict[str, Any] = {},  # noqa: B006
-        auto_xcom: bool = True,
+        auto_xcom_decorators: bool = True,
         # XCom parameters
         enable_xcom: bool = False,
         xcom_namespace: str = "default",
         xcom_ttl_seconds: int = 3600,
+        # Dependency parameters
+        depends_on: Optional[List[str]] = None,
+        auto_xcom: bool = False,
     ) -> "Task":
-        """Create new task with auto-generated UUID and XCom support.
+        """Create new task with optional custom ID, XCom and dependency support.
 
         Args:
             user_id: User identifier (default: from environment USER)
+            task_id: Custom task ID (default: auto-generated UUID)
             priority: Task priority
             payload: Task data payload
             max_retries: Maximum retry attempts
@@ -152,10 +222,12 @@ class Task:
             func: Optional function to execute
             args: Function arguments
             kwargs: Function keyword arguments
-            auto_xcom: Automatically configure XCom from function decorators
+            auto_xcom_decorators: Automatically configure XCom from function decorators
             enable_xcom: Enable XCom functionality
             xcom_namespace: XCom namespace for data storage
             xcom_ttl_seconds: Default TTL for XCom data
+            depends_on: List of task IDs this task depends on
+            auto_xcom: Automatically pass result to dependents via XCom
 
         Returns:
             New Task instance
@@ -165,8 +237,15 @@ class Task:
             assert user_id, "User ID must be provided or set in environment"
 
         current_time = time.time()
+
+        # Determine initial state based on execute_after
+        initial_state = TaskState.SCHEDULED if execute_after and execute_after > current_time else TaskState.QUEUED
+
+        # Generate task_id if not provided
+        effective_task_id = task_id if task_id is not None else str(uuid.uuid4())
+
         task = cls(
-            task_id=str(uuid.uuid4()),
+            task_id=effective_task_id,
             user_id=user_id,
             priority=priority,
             payload=payload,
@@ -180,10 +259,13 @@ class Task:
             enable_xcom=enable_xcom,
             xcom_namespace=xcom_namespace,
             xcom_ttl_seconds=xcom_ttl_seconds,
+            depends_on=depends_on or [],
+            state=initial_state,
+            auto_xcom=auto_xcom,
         )
 
         # Auto-configure XCom from function decorators
-        if auto_xcom and func:
+        if auto_xcom_decorators and func:
             task._configure_xcom_from_decorators()
 
         return task
@@ -195,6 +277,168 @@ class Task:
             True if task is ready to execute, False otherwise
         """
         return time.time() >= self.execute_after
+
+    def is_ready_for_execution(self) -> bool:
+        """Check if task is ready for execution (time and dependencies).
+
+        Returns:
+            True if task can be executed now, False otherwise
+        """
+        return (
+            self.state == TaskState.QUEUED and
+            self.is_ready_to_execute() and
+            not self.depends_on  # No unresolved dependencies
+        )
+
+    def mark_started(self) -> "Task":
+        """Mark task as started and return new instance.
+
+        Returns:
+            New Task instance with STARTED state and started_at timestamp
+        """
+        return dataclasses.replace(
+            self,
+            state=TaskState.STARTED,
+            started_at=time.time()
+        )
+
+    def mark_finished(self, result: Optional[Any] = None) -> "Task":
+        """Mark task as finished and return new instance.
+
+        Args:
+            result: Optional task execution result
+
+        Returns:
+            New Task instance with FINISHED state and finished_at timestamp
+        """
+        return dataclasses.replace(
+            self,
+            state=TaskState.FINISHED,
+            finished_at=time.time(),
+            result=result
+        )
+
+    def mark_failed(self, error: Optional[str] = None) -> "Task":
+        """Mark task as failed and return new instance.
+
+        Args:
+            error: Optional error message
+
+        Returns:
+            New Task instance with FAILED state
+        """
+        payload = self.payload.copy()
+        if error:
+            payload["_error"] = error
+
+        return dataclasses.replace(
+            self,
+            state=TaskState.FAILED,
+            payload=payload,
+            finished_at=time.time()
+        )
+
+    def mark_deferred(self) -> "Task":
+        """Mark task as deferred (waiting for dependencies).
+
+        Returns:
+            New Task instance with DEFERRED state
+        """
+        return dataclasses.replace(self, state=TaskState.DEFERRED)
+
+    def mark_canceled(self) -> "Task":
+        """Mark task as canceled.
+
+        Returns:
+            New Task instance with CANCELED state
+        """
+        return dataclasses.replace(
+            self,
+            state=TaskState.CANCELED,
+            finished_at=time.time()
+        )
+
+    def add_dependent(self, task_id: str) -> "Task":
+        """Add a dependent task ID.
+
+        Args:
+            task_id: ID of task that depends on this task
+
+        Returns:
+            New Task instance with updated dependents list
+        """
+        if task_id not in self.dependents:
+            new_dependents = self.dependents + [task_id]
+            return dataclasses.replace(self, dependents=new_dependents)
+        return self
+
+    def remove_dependency(self, task_id: str) -> "Task":
+        """Remove a dependency (when dependency completes).
+
+        Args:
+            task_id: ID of completed dependency task
+
+        Returns:
+            New Task instance with updated depends_on list
+        """
+        if task_id in self.depends_on:
+            new_depends_on = [dep for dep in self.depends_on if dep != task_id]
+            # If no more dependencies and in deferred state, move to queued
+            new_state = TaskState.QUEUED if not new_depends_on and self.state == TaskState.DEFERRED else self.state
+            return dataclasses.replace(
+                self,
+                depends_on=new_depends_on,
+                state=new_state
+            )
+        return self
+
+    def __rshift__(self, other: "Union[Task, Executable]") -> "Pipeline":
+        """Implement >> operator for task dependencies (self >> other).
+
+        Args:
+            other: Task or Executable that should depend on this task
+
+        Returns:
+            Pipeline representing the dependency relationship
+        """
+        from fairque.core.pipeline import Pipeline, TaskWrapper
+
+        if isinstance(other, Task):
+            return Pipeline([TaskWrapper(self), TaskWrapper(other)])
+        else:
+            return Pipeline([TaskWrapper(self), other])
+
+    def __lshift__(self, other: "Union[Task, Executable]") -> "Pipeline":
+        """Implement << operator for reverse dependencies (self << other).
+
+        Args:
+            other: Task or Executable that this task should depend on
+
+        Returns:
+            Pipeline representing the dependency relationship
+        """
+        from fairque.core.pipeline import Pipeline, TaskWrapper
+
+        if isinstance(other, Task):
+            return Pipeline([TaskWrapper(other), TaskWrapper(self)])
+        else:
+            return Pipeline([other, TaskWrapper(self)])
+
+    def __or__(self, other: "Union[Task, Executable]") -> "ParallelGroup":
+        """Implement | operator for parallel execution (self | other).
+
+        Args:
+            other: Task or Executable to execute in parallel with this task
+
+        Returns:
+            ParallelGroup containing both tasks
+        """
+        from fairque.core.pipeline import ParallelGroup, TaskWrapper
+
+        if isinstance(other, Task):
+            return ParallelGroup([TaskWrapper(self), TaskWrapper(other)])
+        else:
+            return ParallelGroup([TaskWrapper(self), other])
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Make Task callable. Execute the stored function or update arguments.
@@ -420,7 +664,17 @@ class Task:
             "max_retries": str(self.max_retries),
             "created_at": f"{self.created_at:.6f}",  # limited precision
             "execute_after": f"{self.execute_after:.6f}",
+            "state": self.state.value,
+            "depends_on": json.dumps(self.depends_on),
+            "dependents": json.dumps(self.dependents),
+            "auto_xcom": "1" if self.auto_xcom else "0",
         }
+
+        # Add optional timestamps
+        if self.started_at is not None:
+            base_data["started_at"] = f"{self.started_at:.6f}"
+        if self.finished_at is not None:
+            base_data["finished_at"] = f"{self.finished_at:.6f}"
 
         # Embed function metadata in payload
         if self.func is not None:
@@ -465,6 +719,12 @@ class Task:
             max_retries=int(data["max_retries"]),
             created_at=float(data["created_at"]),
             execute_after=float(data["execute_after"]),
+            state=TaskState(data.get("state", TaskState.QUEUED.value)),
+            depends_on=json.loads(data.get("depends_on", "[]")),
+            dependents=json.loads(data.get("dependents", "[]")),
+            auto_xcom=data.get("auto_xcom", "0") == "1",
+            started_at=float(data["started_at"]) if data.get("started_at") else None,
+            finished_at=float(data["finished_at"]) if data.get("finished_at") else None,
         )
 
         # Restore function if present

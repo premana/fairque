@@ -3,7 +3,7 @@
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import redis
 
@@ -15,6 +15,7 @@ from fairque.core.exceptions import (
     TaskValidationError,
 )
 from fairque.core.models import Priority, Task
+from fairque.core.pipeline import Executable
 from fairque.utils.lua_manager import LuaScriptManager
 
 logger = logging.getLogger(__name__)
@@ -375,6 +376,71 @@ class TaskQueue:
                 "details": str(e),
                 "raw_result": str(result)
             }) from e
+
+    def enqueue(self, executable: Union[Task, "Executable"]) -> List[Dict[str, Any]]:
+        """Enqueue a task or pipeline/taskgroup with dependency expansion.
+
+        Args:
+            executable: Task, Pipeline, or TaskGroup to enqueue
+
+        Returns:
+            List of operation results for each task that was enqueued
+
+        Raises:
+            TaskValidationError: If task validation fails
+            ValueError: If pipeline would create cycles
+        """
+        from fairque.core.pipeline import Executable
+
+        # Handle single task
+        if isinstance(executable, Task):
+            result = self.push(executable)
+            return [result]
+
+        # Handle pipeline/taskgroup
+        if isinstance(executable, Executable):
+            # Expand pipeline into individual tasks
+            if hasattr(executable, 'expand'):
+                # Pipeline with expand method
+                expanded_tasks = executable.expand()
+            else:
+                # Simple executable (TaskWrapper, etc.)
+                expanded_tasks = executable.get_tasks()
+
+            # Validate no cycles in expanded tasks
+            self._validate_task_dependencies(expanded_tasks)
+
+            # Enqueue all tasks
+            results = []
+            for task in expanded_tasks:
+                result = self.push(task)
+                results.append(result)
+                logger.debug(f"Enqueued expanded task {task.task_id} from pipeline")
+
+            return results
+
+        raise TypeError(f"Cannot enqueue object of type {type(executable)}")
+
+    def _validate_task_dependencies(self, tasks: List[Task]) -> None:
+        """Validate that tasks don't create dependency cycles.
+
+        Args:
+            tasks: List of tasks to validate
+
+        Raises:
+            ValueError: If cycles are detected
+        """
+        from fairque.core.models import detect_dependency_cycle
+
+        # Build dependency graph
+        task_dependencies = {}
+        for task in tasks:
+            task_dependencies[task.task_id] = task.depends_on.copy()
+
+        # Check each task for cycles
+        for task in tasks:
+            if detect_dependency_cycle(task_dependencies, task.task_id, task.depends_on):
+                raise ValueError(f"Task {task.task_id} would create a dependency cycle")
 
     def push_batch(self, tasks: List[Task]) -> List[Dict[str, Any]]:
         """Push multiple tasks efficiently.

@@ -4,7 +4,7 @@ import functools
 import logging
 import os
 import time
-from typing import Any, Callable, Dict, Optional, TypeVar
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from fairque.core.function_registry import FunctionRegistry
 from fairque.core.models import Priority, Task
@@ -150,9 +150,11 @@ def xcom_task(
     pull_keys: Optional[Dict[str, str]] = None,
     pull_defaults: Optional[Dict[str, Any]] = None,
     ttl_seconds: int = 3600,
-    namespace: Optional[str] = None
+    namespace: Optional[str] = None,
+    depends_on: Optional[List[str]] = None,
+    auto_xcom: bool = False
 ) -> Callable[[F], F]:
-    """Combined decorator for XCom pull and push functionality.
+    """Combined decorator for XCom pull and push functionality with dependencies.
 
     Args:
         push_key: XCom key to store return value
@@ -160,14 +162,18 @@ def xcom_task(
         pull_defaults: Default values for XCom keys if not found
         ttl_seconds: TTL in seconds (default=3600, 0=no TTL, >0=specific TTL)
         namespace: Custom namespace for this task
+        depends_on: List of task IDs this task depends on
+        auto_xcom: Automatically pass result to dependents via XCom
 
     Usage:
         @xcom_task(
             push_key="final_result",
             pull_keys={"input_data": "raw_data", "config": "settings"},
             pull_defaults={"config": {"timeout": 30}},
+            depends_on=["preprocessing_task"],
             ttl_seconds=3600,
-            namespace="my_workflow"
+            namespace="my_workflow",
+            auto_xcom=True
         )
         def process_data(input_data, config, multiplier=2):
             return input_data * multiplier * config.get("factor", 1)
@@ -191,7 +197,9 @@ def xcom_task(
             'pull_keys': pull_keys or {},
             'pull_defaults': pull_defaults or {},
             'ttl_seconds': ttl_seconds,
-            'namespace': namespace
+            'namespace': namespace,
+            'depends_on': depends_on,
+            'auto_xcom': auto_xcom
         }
 
         return func
@@ -199,6 +207,7 @@ def xcom_task(
 
 
 def task(
+    task_id: Optional[str] = None,
     priority: Priority = Priority.NORMAL,
     max_retries: int = 3,
     user_id: Optional[str] = None,
@@ -210,11 +219,15 @@ def task(
     pull_keys: Optional[Dict[str, str]] = None,
     pull_defaults: Optional[Dict[str, Any]] = None,
     xcom_ttl_seconds: int = 3600,
-    xcom_namespace: str = "default"
+    xcom_namespace: str = "default",
+    # Dependency parameters
+    depends_on: Optional[List[str]] = None,
+    auto_xcom: bool = False,
 ) -> Callable[[Callable[..., Any]], Callable[..., Task]]:
-    """Enhanced task decorator with XCom support.
+    """Enhanced task decorator with XCom and dependency support.
 
     Args:
+        task_id: Custom task ID (default: auto-generated UUID)
         priority: Task priority (default: NORMAL)
         max_retries: Maximum retry attempts (default: 3)
         user_id: User identifier (default: from environment USER)
@@ -226,26 +239,33 @@ def task(
         pull_defaults: Default values for XCom keys if not found
         xcom_ttl_seconds: Default TTL for XCom data
         xcom_namespace: XCom namespace for data storage
+        depends_on: List of task IDs this task depends on
+        auto_xcom: Automatically pass result to dependents via XCom
 
     Returns:
         Decorator function that converts a function into a task factory
 
     Example:
-        # Standard task without XCom (default)
-        @fairque.task()
-        def simple_task():
-            return "processed"
+        # Task with custom ID
+        @fairque.task(task_id="preprocessing")
+        def preprocessing_task():
+            return "preprocessed"
 
-        # XCom-enabled task (explicit)
+        # Task with dependencies using custom IDs
+        @fairque.task(task_id="processing", depends_on=["preprocessing"])
+        def processing_task():
+            return "depends on preprocessing"
+
+        # XCom-enabled task with dependencies
         @fairque.task(
+            task_id="final_processing",
             enable_xcom=True,
             push_key="processed_data",
-            pull_keys={"raw_data": "input_data"},
-            xcom_ttl_seconds=3600,
-            xcom_namespace="workflow_a"
+            depends_on=["preprocessing"],
+            auto_xcom=True
         )
-        def xcom_task(raw_data, multiplier=2):
-            return raw_data * multiplier
+        def final_task():
+            return "processed data"
     """
     def decorator(func: Callable[..., Any]) -> Callable[..., Task]:
         # Apply XCom decorators only if explicitly enabled
@@ -266,6 +286,7 @@ def task(
 
         # Store task metadata
         func._fairque_task_config = {  # type: ignore
+            'task_id': task_id,
             'priority': priority,
             'max_retries': max_retries,
             'user_id': user_id,
@@ -273,7 +294,9 @@ def task(
             'payload': payload,
             'xcom_enabled': enable_xcom,
             'xcom_ttl_seconds': xcom_ttl_seconds,
-            'xcom_namespace': xcom_namespace
+            'xcom_namespace': xcom_namespace,
+            'depends_on': depends_on,
+            'auto_xcom': auto_xcom
         }
 
         @functools.wraps(func)
@@ -288,9 +311,10 @@ def task(
             # Create payload with any additional data
             effective_payload = payload.copy() if payload else {}
 
-            # Create task with XCom configuration
+            # Create task with XCom and dependency configuration
             return Task.create(
                 user_id=effective_user_id,
+                task_id=task_id,
                 priority=priority,
                 payload=effective_payload,
                 max_retries=max_retries,
@@ -301,7 +325,9 @@ def task(
                 enable_xcom=enable_xcom,
                 xcom_namespace=xcom_namespace,
                 xcom_ttl_seconds=xcom_ttl_seconds,
-                auto_xcom=True  # Auto-configure from decorators
+                depends_on=depends_on,
+                auto_xcom=auto_xcom,
+                auto_xcom_decorators=True  # Auto-configure from decorators
             )
 
         return task_factory

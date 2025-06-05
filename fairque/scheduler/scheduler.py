@@ -9,8 +9,9 @@ from typing import Any, Dict, List, Optional
 import redis
 from redis import Redis
 
+from fairque.core.config import FairQueueConfig
 from fairque.core.exceptions import RedisConnectionError
-from fairque.core.models import Priority
+from fairque.core.models import Task
 from fairque.queue.queue import TaskQueue
 from fairque.scheduler.models import ScheduledTask
 
@@ -38,8 +39,8 @@ class TaskScheduler:
 
     def __init__(
         self,
-        queue: TaskQueue,
-        scheduler_id: str,
+        config: FairQueueConfig,
+        scheduler_id: Optional[str] = None,
         schedules_key: str = "fairque:schedules",
         lock_key: str = "fairque:scheduler_lock",
         check_interval: int = 60,
@@ -48,20 +49,22 @@ class TaskScheduler:
         """Initialize task scheduler.
 
         Args:
-            queue: FairQueue instance for task execution
-            scheduler_id: Unique identifier for this scheduler
+            config: FairQueue configuration
+            scheduler_id: Unique identifier for this scheduler (auto-generated if None)
             schedules_key: Redis key for storing schedules
             lock_key: Redis key for distributed locking
             check_interval: Interval between schedule checks (seconds)
             lock_timeout: Lock timeout in seconds
         """
-        self.queue = queue
-        self.scheduler_id = scheduler_id
+        import uuid
+
+        self.config = config
+        self.queue = TaskQueue(config)
+        self.scheduler_id = scheduler_id or f"scheduler-{uuid.uuid4()}"
 
         # TaskScheduler requires a synchronous Redis client
-        # Always create a new sync client to ensure compatibility
         try:
-            self.redis: Redis = queue.config.create_redis_client()
+            self.redis: Redis = config.create_redis_client()
             # Test the connection
             self.redis.ping()
         except redis.RedisError as e:
@@ -97,9 +100,7 @@ class TaskScheduler:
     def add_schedule(
         self,
         cron_expr: str,
-        user_id: str,
-        priority: Priority,
-        payload: Dict[str, Any],
+        task: Task,
         timezone: str = "UTC",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
@@ -107,9 +108,7 @@ class TaskScheduler:
 
         Args:
             cron_expr: Cron expression (e.g., "0 9 * * *" for daily at 9 AM)
-            user_id: User ID for the task
-            priority: Task priority
-            payload: Task payload
+            task: Task to be scheduled
             timezone: Timezone for cron expression
             metadata: Additional metadata
 
@@ -123,9 +122,7 @@ class TaskScheduler:
         # Create scheduled task
         scheduled_task = ScheduledTask.create(
             cron_expr=cron_expr,
-            user_id=user_id,
-            priority=priority,
-            payload=payload,
+            task=task,
             timezone=timezone,
             metadata=metadata,
         )
@@ -140,7 +137,7 @@ class TaskScheduler:
 
             logger.info(
                 f"Added schedule {scheduled_task.schedule_id}: "
-                f"cron='{cron_expr}', user={user_id}, priority={priority.name}"
+                f"cron='{cron_expr}', task_id={task.task_id}, user={task.user_id}, priority={task.priority.name}"
             )
 
             return scheduled_task.schedule_id
@@ -153,8 +150,7 @@ class TaskScheduler:
         self,
         schedule_id: str,
         cron_expr: Optional[str] = None,
-        priority: Optional[Priority] = None,
-        payload: Optional[Dict[str, Any]] = None,
+        task: Optional[Task] = None,
         timezone: Optional[str] = None,
         is_active: Optional[bool] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -164,8 +160,7 @@ class TaskScheduler:
         Args:
             schedule_id: ID of the schedule to update
             cron_expr: New cron expression (optional)
-            priority: New priority (optional)
-            payload: New payload (optional)
+            task: New task (optional)
             timezone: New timezone (optional)
             is_active: New active status (optional)
             metadata: New metadata (optional)
@@ -188,11 +183,8 @@ class TaskScheduler:
             # Recalculate next run time
             scheduled_task.next_run = scheduled_task.calculate_next_run()
 
-        if priority is not None:
-            scheduled_task.priority = priority
-
-        if payload is not None:
-            scheduled_task.payload = payload
+        if task is not None:
+            scheduled_task.task = task
 
         if timezone is not None:
             scheduled_task.timezone = timezone
@@ -312,7 +304,7 @@ class TaskScheduler:
                     scheduled_task = ScheduledTask.from_json(data_str)
 
                     # Apply filters
-                    if user_id is not None and scheduled_task.user_id != user_id:
+                    if user_id is not None and scheduled_task.task.user_id != user_id:
                         continue
 
                     if is_active is not None and scheduled_task.is_active != is_active:
@@ -472,7 +464,7 @@ class TaskScheduler:
                     f"Executed scheduled task: "
                     f"schedule_id={scheduled_task.schedule_id}, "
                     f"task_id={task.task_id}, "
-                    f"user={scheduled_task.user_id}"
+                    f"user={scheduled_task.task.user_id}"
                 )
 
             except Exception as e:
@@ -527,12 +519,12 @@ class TaskScheduler:
             # Group by user
             by_user: Dict[str, int] = {}
             for schedule in active_schedules:
-                by_user[schedule.user_id] = by_user.get(schedule.user_id, 0) + 1
+                by_user[schedule.task.user_id] = by_user.get(schedule.task.user_id, 0) + 1
 
             # Group by priority
             by_priority: Dict[str, int] = {}
             for schedule in active_schedules:
-                priority_name = schedule.priority.name
+                priority_name = schedule.task.priority.name
                 by_priority[priority_name] = by_priority.get(priority_name, 0) + 1
 
             return {

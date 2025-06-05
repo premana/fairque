@@ -6,23 +6,21 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
-from fairque.core.models import Priority, Task
+from fairque.core.models import Task
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ScheduledTask:
-    """Scheduled task with cron expression and function execution support.
+    """Scheduled task containing a Task with cron expression for scheduling.
 
     Attributes:
         schedule_id: Unique identifier for the scheduled task
         cron_expression: Cron expression for scheduling (e.g., "0 9 * * *")
-        user_id: Target user ID for the task
-        priority: Task priority level
-        payload: Task payload data
+        task: The task to be executed
         timezone: Timezone for cron expression (default: UTC)
         is_active: Whether the schedule is active
         last_run: Timestamp of last execution
@@ -30,16 +28,11 @@ class ScheduledTask:
         created_at: Timestamp when schedule was created
         updated_at: Timestamp when schedule was last updated
         metadata: Additional metadata for the schedule
-        func: Optional function to execute
-        args: Function arguments
-        kwargs: Function keyword arguments
     """
 
     schedule_id: str
     cron_expression: str
-    user_id: str
-    priority: Priority
-    payload: Dict[str, Any]
+    task: Task
     timezone: str = "UTC"
     is_active: bool = True
     last_run: Optional[float] = None
@@ -48,28 +41,19 @@ class ScheduledTask:
     updated_at: float = field(default_factory=time.time)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    # Function execution support
-    func: Optional[Callable[..., Any]] = field(default=None, compare=False, repr=False)
-    args: Tuple[Any, ...] = field(default_factory=tuple, compare=False, repr=False)
-    kwargs: Dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
-
     @classmethod
     def create(
         cls,
         cron_expr: str,
-        user_id: str,
-        priority: Priority,
-        payload: Dict[str, Any],
+        task: Task,
         timezone: str = "UTC",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> "ScheduledTask":
-        """Create a new scheduled task.
+        """Create a new scheduled task from a Task.
 
         Args:
             cron_expr: Cron expression for scheduling
-            user_id: User ID for the task
-            priority: Task priority
-            payload: Task payload
+            task: Task to be scheduled
             timezone: Timezone for cron expression
             metadata: Additional metadata
 
@@ -79,9 +63,7 @@ class ScheduledTask:
         scheduled_task = cls(
             schedule_id=str(uuid.uuid4()),
             cron_expression=cron_expr,
-            user_id=user_id,
-            priority=priority,
-            payload=payload,
+            task=task,
             timezone=timezone,
             is_active=True,
             last_run=None,
@@ -135,18 +117,36 @@ class ScheduledTask:
             raise ValueError(f"Invalid cron expression '{self.cron_expression}': {e}") from e
 
     def create_task(self) -> Task:
-        """Convert to Task with function support."""
+        """Create a task instance for execution with scheduling metadata.
+
+        Returns:
+            Task instance with scheduling metadata added to payload
+        """
+        # Add scheduling metadata to the task's payload
+        enhanced_payload = {
+            **self.task.payload,
+            "__scheduled__": True,
+            "__schedule_id__": self.schedule_id,
+            "__cron_expression__": self.cron_expression,
+            "__scheduled_at__": time.time(),
+        }
+
+        # Create a new task instance with enhanced payload
         return Task.create(
-            user_id=self.user_id,
-            priority=self.priority,
-            payload={
-                **self.payload,
-                "__scheduled__": True,
-                "__schedule_id__": self.schedule_id,
-            },
-            func=self.func,
-            args=self.args,
-            kwargs=self.kwargs,
+            task_id=self.task.task_id,  # Preserve original task ID or let it generate new one
+            user_id=self.task.user_id,
+            priority=self.task.priority,
+            payload=enhanced_payload,
+            max_retries=self.task.max_retries,
+            execute_after=time.time(),  # Execute immediately when scheduled
+            func=self.task.func,
+            args=self.task.args,
+            kwargs=self.task.kwargs,
+            enable_xcom=self.task.enable_xcom,
+            xcom_namespace=self.task.xcom_namespace,
+            xcom_ttl_seconds=self.task.xcom_ttl_seconds,
+            depends_on=self.task.depends_on,
+            auto_xcom=self.task.auto_xcom,
         )
 
     def update_after_run(self, run_time: float) -> None:
@@ -168,9 +168,7 @@ class ScheduledTask:
         return {
             "schedule_id": self.schedule_id,
             "cron_expression": self.cron_expression,
-            "user_id": self.user_id,
-            "priority": self.priority.value,
-            "payload": self.payload,
+            "task": self.task.to_redis_dict(),  # Store task as nested dict
             "timezone": self.timezone,
             "is_active": self.is_active,
             "last_run": self.last_run,
@@ -195,12 +193,14 @@ class ScheduledTask:
             ValueError: If data is invalid
         """
         try:
+            # Restore task from nested dictionary
+            task_data = data["task"]
+            task = Task.from_redis_dict(task_data)
+
             return cls(
                 schedule_id=data["schedule_id"],
                 cron_expression=data["cron_expression"],
-                user_id=data["user_id"],
-                priority=Priority(data["priority"]),
-                payload=data["payload"],
+                task=task,
                 timezone=data.get("timezone", "UTC"),
                 is_active=data.get("is_active", True),
                 last_run=data.get("last_run"),

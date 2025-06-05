@@ -31,7 +31,18 @@ from fairque.core.exceptions import (
     TaskSerializationError,
     TaskValidationError,
 )
-from fairque.core.models import DLQEntry, Priority, Task
+from fairque.core.models import DLQEntry, Priority, Task, TaskState
+from fairque.core.pipeline import (
+    Executable,
+    ParallelGroup,
+    Pipeline,
+    SequentialGroup,
+    TaskGroup,
+    TaskWrapper,
+    create_pipeline,
+    parallel,
+    sequential,
+)
 from fairque.core.xcom import XComManager, XComValue
 from fairque.decorator import task, xcom_pull, xcom_push, xcom_task
 from fairque.queue.async_queue import AsyncTaskQueue
@@ -47,7 +58,18 @@ __all__ = [
     # Core models
     "Priority",
     "Task",
+    "TaskState",
     "DLQEntry",
+    # Pipeline functionality
+    "Executable",
+    "Pipeline",
+    "TaskGroup",
+    "SequentialGroup",
+    "ParallelGroup",
+    "TaskWrapper",
+    "create_pipeline",
+    "parallel",
+    "sequential",
     # XCom functionality
     "XComValue",
     "XComManager",
