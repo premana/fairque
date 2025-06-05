@@ -122,9 +122,67 @@ fairque/
 - **Performance Options**: Choose based on use case and environment
 
 ## Current Phase
-**Phase 10: Multi-Worker Configuration Support** - ✅ **MULTI-WORKER CONFIGURATION COMPLETED**
+**Phase 11: CLI Monitoring & Dashboard Preparation** - ✅ **CLI MONITORING FOUNDATION COMPLETED**
 
-**Status**: **🎉 MULTI-WORKER FAIRQUEUECONFIG SUPPORT COMPLETE 🎉**
+**Status**: **🎉 CLI MONITORING AND GET_METRICS SYSTEM COMPLETE 🎉**
+
+### CLI Monitoring Features
+- **get_metrics() API**: Granular metrics with level-based control ("basic", "detailed", "worker", "queue")
+- **stats.lua Extension**: Enhanced Lua script supporting get_metrics operation with target parameter
+- **fairque-info Command**: CLI monitoring tool similar to 'rq info' with rich formatting
+- **Real-time Monitoring**: Live updating display with --interval support
+- **Rich UI Support**: Beautiful tables and progress bars when rich library available
+- **Plain Text Fallback**: Works without rich dependency for basic monitoring
+- **Configuration Integration**: Uses existing YAML configuration files
+- **Dual Queue Support**: Both sync and async TaskQueue support get_metrics()
+
+### get_metrics() API Details
+```python
+# Basic metrics - essential stats for CLI
+queue.get_metrics("basic") → {"total_tasks": 42, "dlq_size": 3, "push_rate": 1.2}
+
+# Detailed metrics - includes priority breakdown
+queue.get_metrics("detailed") → basic + priority-specific stats
+
+# Worker metrics - individual or all workers
+queue.get_metrics("worker", "worker1") → worker-specific stats
+queue.get_metrics("worker", "all") → all workers overview
+
+# Queue metrics - user-specific or all queues
+queue.get_metrics("queue", "user_0") → user's queue sizes
+queue.get_metrics("queue", "all") → all users' queues with totals
+```
+
+### fairque-info CLI Usage
+```bash
+# Basic display
+fairque-info
+
+# Specific users only
+fairque-info user_0 user_1
+
+# Real-time monitoring (1 second updates)
+fairque-info --interval 1
+
+# Detailed metrics
+fairque-info --detailed
+
+# Custom config file
+fairque-info -c /path/to/config.yaml
+```
+
+### Dashboard Preparation
+- **Monitoring Module**: New `fairque.monitoring` package structure
+- **API Foundation**: get_metrics() provides all data needed for web dashboard
+- **Configuration Ready**: CLI uses same config system as main fairque
+- **Extension Points**: Modular design for future dashboard integration
+
+### Implementation Architecture
+- **Lua Server-side Processing**: All metrics calculations in Redis via Lua scripts
+- **Minimal Dependencies**: Core monitoring works without rich, enhanced with rich
+- **Type-safe APIs**: Full typing annotations and validation
+- **Error Handling**: Comprehensive error handling with meaningful messages
+- **Performance Optimized**: Single Redis call per metrics request
 
 ### Multi-Worker Configuration Features
 - **Multiple Worker Support**: FairQueueConfig now accepts multiple WorkerConfig instances via `workers` field

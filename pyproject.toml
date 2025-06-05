@@ -34,6 +34,12 @@ scheduler = [
     "croniter>=1.4.0",
     "pytz>=2023.3",
 ]
+monitoring = [
+    "rich>=10.0.0",
+]
+
+[project.scripts]
+fairque-info = "fairque.monitoring.cli:main"
 
 [build-system]
 requires = ["hatchling"]

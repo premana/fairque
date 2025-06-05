@@ -334,6 +334,48 @@ class TaskQueue:
                 "raw_result": str(result)
             }) from e
 
+    def get_metrics(self, level: str = "basic", target: Optional[str] = None) -> Dict[str, Any]:
+        """Get metrics with specified granularity level.
+
+        Args:
+            level: Granularity level ("basic", "detailed", "worker", "queue")
+            target: Target identifier (user_id, worker_id, or None for "all")
+
+        Returns:
+            Dictionary with requested metrics
+
+        Raises:
+            LuaScriptError: If Lua script execution fails
+        """
+        result = "N/A"  # Default value for result in case of failure
+        try:
+            args = ["get_metrics", level]
+            if target is not None:
+                args.append(target)
+
+            result = self.lua_manager.execute_script("stats", args=args)
+            response = json.loads(result)
+
+            if not response.get("success", False):
+                error_code = response.get("error_code", "UNKNOWN")
+                error_message = response.get("message", "Unknown error")
+                raise LuaScriptError("stats", {
+                    "error_code": error_code,
+                    "message": error_message,
+                    "operation": "get_metrics",
+                    "level": level,
+                    "target": target
+                })
+
+            return dict(response.get("data", {}))
+
+        except json.JSONDecodeError as e:
+            raise LuaScriptError("stats", {
+                "error": "json_decode_error",
+                "details": str(e),
+                "raw_result": str(result)
+            }) from e
+
     def push_batch(self, tasks: List[Task]) -> List[Dict[str, Any]]:
         """Push multiple tasks efficiently.
 
