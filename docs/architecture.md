@@ -431,6 +431,87 @@ elapsed_time = current_time - created_at
 
 This ensures higher priority tasks and older tasks get processed first.
 
+## Task State Management and Dependencies
+
+FairQueue provides sophisticated dependency management with a comprehensive state machine to handle complex workflow scenarios.
+
+### Task States
+
+```python
+from fairque import TaskState
+
+# Available states (7 states):
+TaskState.QUEUED     # Ready for execution
+TaskState.STARTED    # Currently executing
+TaskState.DEFERRED   # Waiting for dependencies
+TaskState.FINISHED   # Successfully completed
+TaskState.FAILED     # Execution failed
+TaskState.CANCELED   # Manually canceled
+TaskState.SCHEDULED  # Waiting for execute_after time
+```
+
+### Task State Transition Diagram
+
+```mermaid
+stateDiagram-v2
+    [*] --> SCHEDULED : Task created with future execute_after
+    [*] --> QUEUED : Task created ready for execution
+    [*] --> DEFERRED : Task created with unmet dependencies
+
+    SCHEDULED --> QUEUED : execute_after time reached
+    QUEUED --> STARTED : Worker picks up task
+    QUEUED --> DEFERRED : Dependencies detected
+    QUEUED --> CANCELED : Manual cancellation
+
+    STARTED --> FINISHED : Task completes successfully
+    STARTED --> FAILED : Task execution fails
+    STARTED --> CANCELED : Manual cancellation during execution
+
+    DEFERRED --> QUEUED : All dependencies completed
+    DEFERRED --> CANCELED : Manual cancellation
+
+    FAILED --> QUEUED : Retry attempt (if retries available)
+    FAILED --> [*] : Max retries reached → DLQ
+
+    FINISHED --> [*] : Task lifecycle complete
+    CANCELED --> [*] : Task lifecycle complete
+```
+
+**State Descriptions:**
+- **SCHEDULED**: Task waiting for `execute_after` timestamp to be reached
+- **QUEUED**: Ready for execution, waiting in priority queue for worker pickup
+- **STARTED**: Currently being executed by a worker process
+- **DEFERRED**: Waiting for dependent tasks to complete before becoming executable
+- **FINISHED**: Successfully completed execution with optional result stored
+- **FAILED**: Execution failed (may be retried or moved to Dead Letter Queue)
+- **CANCELED**: Manually canceled by user or system before completion
+
+### Dependency Management
+
+```python
+# Example: Tasks with dependencies
+@task(task_id="extract_data")
+def extract_data():
+    return {"records": 1000}
+
+@task(task_id="transform_data", depends_on=["extract_data"])
+def transform_data():
+    # Automatically receives result from extract_data if auto_xcom=True
+    return {"processed_records": 2000}
+
+@task(task_id="load_data", depends_on=["transform_data"])
+def load_data():
+    return {"status": "loaded"}
+```
+
+**State Transition Rules:**
+1. Tasks can only move to CANCELED from any state except FINISHED
+2. FAILED tasks may transition back to QUEUED for retry attempts
+3. DEFERRED tasks automatically move to QUEUED when dependencies complete
+4. SCHEDULED tasks automatically move to QUEUED when execute_after time is reached
+5. State transitions are atomic and managed through Redis Lua scripts
+6. Dependency cycles are detected and prevented during task creation
+
 ## Work Stealing Strategy
 
 Workers implement a sophisticated work stealing strategy for load balancing:

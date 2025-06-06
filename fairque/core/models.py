@@ -29,7 +29,6 @@ class TaskState(str, Enum):
     FAILED = "failed"        # Execution failed
     CANCELED = "canceled"    # Manually canceled
     SCHEDULED = "scheduled"  # Waiting for execute_after time
-    STOPPED = "stopped"      # Manually stopped
 
 
 class Priority(IntEnum):

@@ -16,7 +16,7 @@ Production-ready fair queue implementation using Redis with work stealing and pr
 - 🔄 **Task Dependencies**: Sophisticated dependency management with cycle detection
 - 🔗 **Pipeline Operators**: Airflow-style workflow composition (>>, <<, |)
 - ⏰ **Task Scheduling**: Cron-based task scheduling with distributed coordination
-- 📊 **Task States**: Comprehensive state management (queued, started, deferred, finished, etc.)
+- 📊 **Task States**: Comprehensive state management with 7 states (queued, started, deferred, finished, failed, canceled, scheduled)
 
 ## Quick Start
 
@@ -377,7 +377,6 @@ TaskState.FINISHED   # Successfully completed
 TaskState.FAILED     # Execution failed
 TaskState.CANCELED   # Manually canceled
 TaskState.SCHEDULED  # Waiting for execute_after time
-TaskState.STOPPED    # Manually stopped
 ```
 
 ### Pipeline Operators

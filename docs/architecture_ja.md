@@ -344,6 +344,87 @@ elapsed_time = current_time - created_at
 
 これにより、より高い優先度のタスクと古いタスクが最初に処理されることが保証されます。
 
+## タスク状態管理と依存関係
+
+FairQueueは、複雑なワークフローシナリオを処理するための包括的なステートマシンを備えた洗練された依存関係管理を提供します。
+
+### タスクの状態
+
+```python
+from fairque import TaskState
+
+# 利用可能な状態（7つの状態）:
+TaskState.QUEUED     # 実行準備完了
+TaskState.STARTED    # 現在実行中  
+TaskState.DEFERRED   # 依存関係待ち
+TaskState.FINISHED   # 正常完了
+TaskState.FAILED     # 実行失敗
+TaskState.CANCELED   # 手動キャンセル
+TaskState.SCHEDULED  # execute_after時刻待ち
+```
+
+### タスク状態遷移図
+
+```mermaid
+stateDiagram-v2
+    [*] --> SCHEDULED : 将来のexecute_afterでタスク作成
+    [*] --> QUEUED : 実行準備完了でタスク作成
+    [*] --> DEFERRED : 未解決依存関係でタスク作成
+
+    SCHEDULED --> QUEUED : execute_after時刻に到達
+    QUEUED --> STARTED : ワーカーがタスクを取得
+    QUEUED --> DEFERRED : 依存関係が検出
+    QUEUED --> CANCELED : 手動キャンセル
+
+    STARTED --> FINISHED : タスクが正常完了
+    STARTED --> FAILED : タスク実行が失敗
+    STARTED --> CANCELED : 実行中の手動キャンセル
+
+    DEFERRED --> QUEUED : すべての依存関係が完了
+    DEFERRED --> CANCELED : 手動キャンセル
+
+    FAILED --> QUEUED : リトライ試行（リトライ可能な場合）
+    FAILED --> [*] : 最大リトライ数に到達 → DLQ
+
+    FINISHED --> [*] : タスクライフサイクル完了
+    CANCELED --> [*] : タスクライフサイクル完了
+```
+
+**状態の説明:**
+- **SCHEDULED**: `execute_after`タイムスタンプの到達を待つタスク
+- **QUEUED**: 実行準備完了、優先度キューでワーカーによる取得を待つ
+- **STARTED**: ワーカープロセスによって現在実行中
+- **DEFERRED**: 実行可能になる前に依存タスクの完了を待つ
+- **FINISHED**: 実行が正常完了、オプションで結果を保存
+- **FAILED**: 実行失敗（リトライまたはデッドレターキューに移動可能）
+- **CANCELED**: 完了前にユーザーまたはシステムによって手動キャンセル
+
+### 依存関係管理
+
+```python
+# 例: 依存関係を持つタスク
+@task(task_id="extract_data")
+def extract_data():
+    return {"records": 1000}
+
+@task(task_id="transform_data", depends_on=["extract_data"])
+def transform_data():
+    # auto_xcom=Trueの場合、extract_dataから結果を自動受信
+    return {"processed_records": 2000}
+
+@task(task_id="load_data", depends_on=["transform_data"])
+def load_data():
+    return {"status": "loaded"}
+```
+
+**状態遷移ルール:**
+1. FINISHEDを除く任意の状態からCANCELEDに移行可能
+2. FAILEDタスクはリトライ試行のためQUEUEDに戻る可能性
+3. DEFERREDタスクは依存関係完了時に自動的にQUEUEDに移行
+4. SCHEDULEDタスクはexecute_after時刻到達時に自動的にQUEUEDに移行
+5. 状態遷移はアトミックでRedis Luaスクリプトによって管理
+6. 依存関係の循環はタスク作成時に検出・防止
+
 ## ワークスティーリング戦略
 
 ワーカーは負荷分散のための洗練されたワークスティーリング戦略を実装しています：
