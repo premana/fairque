@@ -174,9 +174,9 @@ sequenceDiagram
                 Q-->>W: requeue confirmed
                 W->>M: increment retry metrics
             else Max retries exceeded
-                W->>Q: send to DLQ
-                Q-->>W: DLQ confirmed
-                W->>M: increment DLQ metrics
+                W->>Q: mark task as failed
+                Q-->>W: failure confirmed
+                W->>M: increment failed task metrics
             end
             
             W->>M: increment failure metrics
@@ -235,11 +235,11 @@ sequenceDiagram
             W->>Q: push(updated_task)
             W->>W: update retry stats
         else Max retries exceeded
-            W->>Q: send_to_dlq(task)
-            W->>W: update DLQ stats
+            W->>Q: mark_task_failed(task)
+            W->>W: update failed task stats
         end
     else Task timeout
-        W->>Q: send_to_dlq(task)
+        W->>Q: mark_task_failed(task)
         W->>W: update timeout stats
     end
 ```
@@ -327,11 +327,11 @@ graph TD
     Success -->|Yes| Delete[Delete Task]
     Success -->|No| Retry{Retries Left?}
     Retry -->|Yes| Requeue[Requeue Task]
-    Retry -->|No| DLQ[Send to DLQ]
+    Retry -->|No| FAIL[Mark as Failed]
     
     Delete --> Start
     Requeue --> Start
-    DLQ --> Start
+    FAIL --> Start
 ```
 
 ## Error Handling and Recovery
@@ -360,7 +360,7 @@ sequenceDiagram
             W->>W: increment retry count
             W->>Q: push(task) # requeue
         else Non-retriable or max retries
-            W->>Q: send_to_dlq(task)
+            W->>Q: mark_task_failed(task)
         end
         
     else Queue Connection Error
@@ -375,14 +375,14 @@ sequenceDiagram
         W->>L: log timeout
         W->>M: increment timeout_count
         W->>TH: on_task_failure(task, TimeoutError, timeout_duration)
-        W->>Q: send_to_dlq(task)
+        W->>Q: mark_task_failed(task)
         
     else Task Deserialization Error
         W->>Q: pop()
         Q-->>W: malformed task data
         W->>L: log deserialization error
         W->>M: increment deserialization_error_count
-        W->>Q: send_to_dlq(malformed_task)
+        W->>Q: mark_task_failed(malformed_task)
         
     else Thread Pool Exhaustion
         W->>W: submit task to executor
@@ -401,23 +401,23 @@ graph TD
     
     T -->|Task Processing Error| R1[Check Retry Count]
     T -->|Connection Error| R2[Backoff and Retry]
-    T -->|Timeout Error| R3[Send to DLQ]
-    T -->|Deserialization Error| R4[Send to DLQ]
+    T -->|Timeout Error| R3[Mark as Failed]
+    T -->|Deserialization Error| R4[Mark as Failed]
     T -->|Thread Pool Error| R5[Requeue Task]
     
     R1 --> RC{Retries < Max?}
     RC -->|Yes| RQ[Requeue with Increment]
-    RC -->|No| DLQ[Send to DLQ]
+    RC -->|No| FAIL[Mark as Failed]
     
     R2 --> B[Exponential Backoff]
     B --> C[Continue Polling]
     
-    R3 --> DLQ
-    R4 --> DLQ
+    R3 --> FAIL
+    R4 --> FAIL
     R5 --> RQ
     
     RQ --> L[Log Recovery Action]
-    DLQ --> L
+    FAIL --> L
     C --> L
     
     L --> M[Update Metrics]

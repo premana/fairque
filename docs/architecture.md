@@ -397,13 +397,14 @@ graph LR
 ```mermaid
 graph TB
     subgraph "Redis Keys"
-        CQ["queue:user:{user_id}:critical<br/>(List - FIFO)"]
-        NQ["queue:user:{user_id}:normal<br/>(Sorted Set - Score-based)"]
-        DLQ["dlq<br/>(List - Failed tasks)"]
-        ST["queue:stats<br/>(Hash - Statistics)"]
-        XC["xcom:{namespace}:{user_id}:{key}<br/>(Hash - XCom data with TTL)"]
-        TK["task:{task_id}<br/>(Hash - Task metadata & dependencies)"]
-        SCH["fairque:schedules<br/>(Hash - Scheduled tasks)"]
+        CQ["fq:queue:user:{user_id}:critical<br/>(List - FIFO)"]
+        NQ["fq:queue:user:{user_id}:normal<br/>(Sorted Set - Score-based)"]
+        ST["fq:stats<br/>(Hash - Statistics)"]
+        XC["fq:xcom:{key}<br/>(Hash - XCom data with TTL)"]
+        TK["fq:task:{task_id}<br/>(Hash - Task metadata & dependencies)"]
+        SCH["fq:schedules<br/>(Hash - Scheduled tasks)"]
+        STATE["fq:state:{state}<br/>(Set - Task state registries)"]
+        DEPS["fq:deps:*<br/>(Set - Dependency tracking)"]
     end
     
     subgraph "Priority 6 Tasks"
@@ -414,8 +415,9 @@ graph TB
         T15[Normal Priority Tasks] --> NQ
     end
     
-    subgraph "Failed Tasks"
-        FT[Failed Tasks] --> DLQ
+    subgraph "Task State Management"
+        TS[Task States] --> STATE
+        DEP[Dependencies] --> DEPS
     end
 ```
 

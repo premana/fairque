@@ -331,14 +331,26 @@ Priority.VERY_HIGH   # 5 - Very high priority
 Priority.CRITICAL    # 6 - Critical priority (separate FIFO queue)
 ```
 
-### Queue Structure
+### Redis Key Structure
 
 ```
-queue:user:{user_id}:critical  # Priority.CRITICAL tasks (List, FIFO)
-queue:user:{user_id}:normal    # Priority 1-5 tasks (Sorted Set, Score-based)
-dlq                           # Single DLQ for all failure types (List)
-queue:stats                   # Unified statistics (Hash)
-xcom:{xcom_key}              # XCom data storage (Hash with TTL)
+# Queue keys with fq: prefix
+fq:queue:user:{user_id}:critical    # Priority.CRITICAL tasks (List, FIFO)
+fq:queue:user:{user_id}:normal      # Priority 1-5 tasks (Sorted Set, Score-based)
+
+# State management keys
+fq:state:{state}                    # Task state registries (Set)
+fq:task:{task_id}                   # Task metadata & dependencies (Hash)
+
+# Dependency tracking keys  
+fq:deps:waiting:{task_id}           # Tasks waiting on this task (Set)
+fq:deps:blocked:{task_id}           # Tasks this task is blocked by (Set)
+
+# XCom and other keys
+fq:xcom:{key}                       # XCom data storage (Hash with TTL)
+fq:stats                           # Unified statistics (Hash)
+fq:schedules                       # Scheduled tasks (Hash)
+fq:scheduler:lock                  # Scheduler distributed lock
 ```
 
 ### Work Stealing Strategy
@@ -440,11 +452,11 @@ scheduler.start()
 
 ## Development Status
 
-This project is currently in **Phase 10: Multi-Worker Configuration Support**.
+This project is **production-ready** with comprehensive feature set and testing coverage.
 
-### ✅ Completed
+### ✅ Core Features Complete
 - [x] Project setup and structure
-- [x] Core models (Priority, Task, DLQEntry)
+- [x] Core models (Priority, Task, TaskState)
 - [x] Configuration system with multi-worker support
 - [x] Exception handling
 - [x] Lua scripts implementation
@@ -454,8 +466,11 @@ This project is currently in **Phase 10: Multi-Worker Configuration Support**.
 - [x] Async implementation (AsyncTaskQueue, AsyncWorker)
 - [x] Function execution support with @task decorator
 - [x] XCom (Cross Communication) system
+- [x] Task dependencies and pipeline operators
+- [x] Task scheduling with cron expressions
 - [x] Performance testing suite
 - [x] Multi-worker configuration support
+- [x] Comprehensive state management (7 states)
 
 ### 🚧 Optional Extensions
 - [ ] Advanced monitoring and alerting
