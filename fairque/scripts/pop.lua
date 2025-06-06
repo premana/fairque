@@ -1,10 +1,11 @@
--- pop.lua: Pop task from queues with fair scheduling and work stealing
--- This script implements round-robin user selection with work stealing capability
+-- pop.lua with unified state management and fq: prefix
+-- This script implements fair scheduling with automatic QUEUED -> STARTED transition
 
--- Constants
-local CRITICAL_SUFFIX = ":critical"
-local NORMAL_SUFFIX = ":normal"
-local STATS_KEY = "queue:stats"
+-- Redis key prefixes with fq: namespace
+local QUEUE_PREFIX = "fq:queue:user:"
+local STATE_PREFIX = "fq:state:"
+local TASK_PREFIX = "fq:task:"
+local STATS_KEY = "fq:stats"
 
 -- Error codes
 local ERR_INVALID_ARGS = "ERR_INVALID_ARGS"
@@ -12,27 +13,24 @@ local ERR_NO_TASKS = "ERR_NO_TASKS"
 local ERR_QUEUE_OPERATION = "ERR_QUEUE_OPERATION"
 
 -- Helper functions
-local function get_queue_key(user_id, priority)
-    if tonumber(priority) == 6 then
-        return "queue:user:" .. user_id .. CRITICAL_SUFFIX
-    else
-        return "queue:user:" .. user_id .. NORMAL_SUFFIX
-    end
-end
-
 local function get_current_time()
     local time_result = redis.call("TIME")
     return tonumber(time_result[1]) + (tonumber(time_result[2]) / 1000000)
+end
+
+local function get_queue_key(user_id, priority)
+    if tonumber(priority) == 6 then
+        return QUEUE_PREFIX .. user_id .. ":critical"
+    else
+        return QUEUE_PREFIX .. user_id .. ":normal"
+    end
 end
 
 local function update_stats(stat_key, increment)
     increment = increment or 1
     local current_time = get_current_time()
     
-    -- Update counter
     redis.call("HINCRBY", STATS_KEY, stat_key, increment)
-    
-    -- Update timestamp for rate calculations
     redis.call("HSET", STATS_KEY, stat_key .. ":last_update", current_time)
 end
 
@@ -40,30 +38,31 @@ local function is_task_ready(execute_after, current_time)
     return tonumber(execute_after) <= current_time
 end
 
+local function validate_queued_task(task_id)
+    local state = redis.call("HGET", TASK_PREFIX .. task_id, "state")
+    return state == "queued"
+end
+
 -- Try to pop task from critical queue (FIFO)
--- @param user_id: User identifier
--- @param current_time: Current timestamp
--- @return: task_id or nil
 local function try_pop_critical(user_id, current_time)
     local critical_queue = get_queue_key(user_id, 6)
     
-    -- Get all tasks from critical queue (right to left for FIFO)
     local tasks = redis.call("LRANGE", critical_queue, 0, -1)
     
     if #tasks == 0 then
         return nil
     end
     
-    -- Find first ready task
     for i, task_id in ipairs(tasks) do
-        local task_hash = "task:" .. task_id
-        local execute_after = redis.call("HGET", task_hash, "execute_after")
-        
-        if execute_after and is_task_ready(execute_after, current_time) then
-            -- Remove task from queue (by value)
-            local removed = redis.call("LREM", critical_queue, 1, task_id)
-            if removed > 0 then
-                return task_id
+        if validate_queued_task(task_id) then
+            local task_hash = TASK_PREFIX .. task_id
+            local execute_after = redis.call("HGET", task_hash, "execute_after")
+            
+            if execute_after and is_task_ready(execute_after, current_time) then
+                local removed = redis.call("LREM", critical_queue, 1, task_id)
+                if removed > 0 then
+                    return task_id
+                end
             end
         end
     end
@@ -72,31 +71,31 @@ local function try_pop_critical(user_id, current_time)
 end
 
 -- Try to pop task from normal queue (priority sorted)
--- @param user_id: User identifier
--- @param current_time: Current timestamp
--- @return: task_id or nil
 local function try_pop_normal(user_id, current_time)
-    local normal_queue = get_queue_key(user_id, 1) -- Same queue for all normal priorities
+    local normal_queue = get_queue_key(user_id, 1)
     
-    -- Get highest scoring tasks (highest priority)
     local tasks_with_scores = redis.call("ZREVRANGE", normal_queue, 0, 9, "WITHSCORES")
     
     if #tasks_with_scores == 0 then
         return nil
     end
     
-    -- Check tasks in priority order (highest score first)
     for i = 1, #tasks_with_scores, 2 do
         local task_id = tasks_with_scores[i]
-        local task_hash = "task:" .. task_id
-        local execute_after = redis.call("HGET", task_hash, "execute_after")
         
-        if execute_after and is_task_ready(execute_after, current_time) then
-            -- Remove task from sorted set
-            local removed = redis.call("ZREM", normal_queue, task_id)
-            if removed > 0 then
-                return task_id
+        if validate_queued_task(task_id) then
+            local task_hash = TASK_PREFIX .. task_id
+            local execute_after = redis.call("HGET", task_hash, "execute_after")
+            
+            if execute_after and is_task_ready(execute_after, current_time) then
+                local removed = redis.call("ZREM", normal_queue, task_id)
+                if removed > 0 then
+                    return task_id
+                end
             end
+        else
+            -- Clean up stale queue entry
+            redis.call("ZREM", normal_queue, task_id)
         end
     end
     
@@ -104,32 +103,32 @@ local function try_pop_normal(user_id, current_time)
 end
 
 -- Try to pop task from user queues
--- @param user_id: User identifier
--- @param current_time: Current timestamp
--- @return: task_id or nil
 local function try_pop_from_user(user_id, current_time)
-    -- First try critical queue (highest priority)
     local task_id = try_pop_critical(user_id, current_time)
     if task_id then
         return task_id
     end
     
-    -- Then try normal queue
     return try_pop_normal(user_id, current_time)
 end
 
 -- Main pop operation
--- ARGV: [user_list] where user_list is comma-separated user IDs
--- Returns: JSON-like response with task data or empty result
+-- ARGV: [user_list, worker_id]
 
 -- Validate arguments
-if #ARGV ~= 1 then
-    return '{"success":false,"error_code":"ERR_INVALID_ARGS","message":"Expected 1 argument (user_list), got ' .. #ARGV .. '"}'
+if #ARGV ~= 2 then
+    return '{"success":false,"error_code":"' .. ERR_INVALID_ARGS .. '","message":"Expected 2 arguments (user_list, worker_id), got ' .. #ARGV .. '"}'
 end
 
 local user_list_str = ARGV[1]
+local worker_id = ARGV[2]
+
 if not user_list_str or user_list_str == "" then
-    return '{"success":false,"error_code":"ERR_INVALID_ARGS","message":"user_list cannot be empty"}'
+    return '{"success":false,"error_code":"' .. ERR_INVALID_ARGS .. '","message":"user_list cannot be empty"}'
+end
+
+if not worker_id or worker_id == "" then
+    return '{"success":false,"error_code":"' .. ERR_INVALID_ARGS .. '","message":"worker_id cannot be empty"}'
 end
 
 -- Parse comma-separated user list
@@ -139,12 +138,12 @@ for user_id in string.gmatch(user_list_str, "([^,]+)") do
 end
 
 if #users == 0 then
-    return '{"success":false,"error_code":"ERR_INVALID_ARGS","message":"No valid users found in user_list"}'
+    return '{"success":false,"error_code":"' .. ERR_INVALID_ARGS .. '","message":"No valid users found in user_list"}'
 end
 
 local current_time = get_current_time()
 
--- Try to find a task from users (round-robin style)
+-- Try to find a ready task from users (fair scheduling)
 local task_id = nil
 local selected_user = nil
 
@@ -158,29 +157,34 @@ end
 
 -- If no task found, return empty result
 if not task_id then
-    return '{"success":true,"data":null,"message":"No ready tasks available"}'
+    return '{"success":true,"task":null,"message":"No ready tasks available"}'
 end
 
 -- Retrieve full task data
-local task_hash = "task:" .. task_id
+local task_hash = TASK_PREFIX .. task_id
 local task_data = redis.call("HMGET", task_hash, 
     "task_id", "user_id", "priority", "payload", "retry_count", "max_retries", "created_at", "execute_after")
 
 -- Validate task data exists
 if not task_data[1] then
-    -- Task was removed between pop and fetch - this shouldn't happen but handle gracefully
-    return '{"success":false,"error_code":"ERR_QUEUE_OPERATION","message":"Task data not found after pop"}'
+    return '{"success":false,"error_code":"' .. ERR_QUEUE_OPERATION .. '","message":"Task data not found after pop"}'
 end
+
+-- Transition QUEUED -> STARTED
+redis.call("ZREM", STATE_PREFIX .. "queued", task_id)
+redis.call("ZADD", STATE_PREFIX .. "started", current_time, task_id)
+redis.call("HMSET", task_hash,
+    "state", "started",
+    "started_at", current_time,
+    "worker_id", worker_id)
 
 -- Update statistics
 update_stats("tasks_popped_total", 1)
-update_stats("tasks_active", -1)
+update_stats("tasks_started", 1)
 
--- Update user-specific statistics
 local user_stat_key = "user:" .. selected_user .. ":tasks_popped"
 update_stats(user_stat_key, 1)
 
--- Update priority-specific statistics
 local priority = tonumber(task_data[3])
 local priority_stat_key = "priority:" .. tostring(priority) .. ":tasks_popped"
 update_stats(priority_stat_key, 1)
@@ -202,15 +206,16 @@ local response_data = {
     created_at = tonumber(task_data[7]),
     execute_after = tonumber(task_data[8]),
     popped_at = current_time,
-    selected_user = selected_user
+    selected_user = selected_user,
+    worker_id = worker_id
 }
 
 -- Build success response
 local response = {
     success = true,
-    data = response_data,
+    task = response_data,
     stats = {
-        tasks_active = redis.call("HGET", STATS_KEY, "tasks_active"),
+        tasks_started = redis.call("HGET", STATS_KEY, "tasks_started"),
         tasks_popped_total = redis.call("HGET", STATS_KEY, "tasks_popped_total")
     }
 }

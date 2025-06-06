@@ -52,3 +52,9 @@ class ConfigurationError(FairQueueError):
     """Configuration validation error."""
 
     pass
+
+
+class StateTransitionError(FairQueueError):
+    """Task state transition error."""
+
+    pass

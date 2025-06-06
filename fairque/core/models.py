@@ -20,15 +20,15 @@ logger = logging.getLogger(__name__)
 
 
 class TaskState(str, Enum):
-    """Task execution states for dependency management."""
+    """Task execution states with unified state management."""
 
     QUEUED = "queued"        # Ready for execution
+    DEFERRED = "deferred"    # Waiting for dependencies (managed in fq:state:queued)
     STARTED = "started"      # Currently executing
-    DEFERRED = "deferred"    # Waiting for dependencies
-    FINISHED = "finished"    # Successfully completed
-    FAILED = "failed"        # Execution failed
-    CANCELED = "canceled"    # Manually canceled
     SCHEDULED = "scheduled"  # Waiting for execute_after time
+    FINISHED = "finished"    # Successfully completed
+    FAILED = "failed"        # Execution failed (unified with DLQ functionality)
+    CANCELED = "canceled"    # Manually canceled
 
 
 class Priority(IntEnum):
@@ -185,6 +185,11 @@ class Task:
     result: Optional[Any] = field(default=None, repr=False, compare=False)
     auto_xcom: bool = False  # Automatically pass result to dependents via XCom
 
+    # Enhanced failure tracking (unified DLQ functionality)
+    failure_type: Optional[str] = None      # "failed"|"expired"|"poisoned"|"timeout"
+    error_message: Optional[str] = None     # Detailed error description
+    retry_history: List[Dict[str, Any]] = field(default_factory=list)  # Retry attempt history
+
     # XCom manager reference (injected by TaskHandler)
     _xcom_manager: Optional['XComManager'] = field(default=None, init=False, repr=False, compare=False)
 
@@ -237,8 +242,13 @@ class Task:
 
         current_time = time.time()
 
-        # Determine initial state based on execute_after
-        initial_state = TaskState.SCHEDULED if execute_after and execute_after > current_time else TaskState.QUEUED
+        # Determine initial state based on execute_after and dependencies
+        if execute_after and execute_after > current_time:
+            initial_state = TaskState.SCHEDULED
+        elif depends_on:
+            initial_state = TaskState.DEFERRED
+        else:
+            initial_state = TaskState.QUEUED
 
         # Generate task_id if not provided
         effective_task_id = task_id if task_id is not None else str(uuid.uuid4())
@@ -317,28 +327,42 @@ class Task:
             result=result
         )
 
-    def mark_failed(self, error: Optional[str] = None) -> "Task":
-        """Mark task as failed and return new instance.
+    def mark_failed(self, error: Optional[str] = None, failure_type: str = "failed") -> "Task":
+        """Mark task as failed with enhanced failure tracking.
 
         Args:
             error: Optional error message
+            failure_type: Type of failure (failed, expired, poisoned, timeout)
 
         Returns:
-            New Task instance with FAILED state
+            New Task instance with FAILED state and failure metadata
         """
-        payload = self.payload.copy()
-        if error:
-            payload["_error"] = error
+        current_time = time.time()
+
+        # Add to retry history
+        retry_entry = {
+            "attempt": self.retry_count + 1,
+            "failed_at": current_time,
+            "error": error or "Unknown error",
+            "failure_type": failure_type
+        }
+
+        new_retry_history = self.retry_history + [retry_entry]
 
         return dataclasses.replace(
             self,
             state=TaskState.FAILED,
-            payload=payload,
-            finished_at=time.time()
+            failure_type=failure_type,
+            error_message=error,
+            retry_history=new_retry_history,
+            finished_at=current_time
         )
 
     def mark_deferred(self) -> "Task":
         """Mark task as deferred (waiting for dependencies).
+
+        Note: Deferred tasks are managed within fq:state:queued but with
+        state field set to 'deferred' for distinction.
 
         Returns:
             New Task instance with DEFERRED state

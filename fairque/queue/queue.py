@@ -1,9 +1,8 @@
-"""Main FairQueue implementation with Redis-based operations."""
+"""FairQueue implementation with unified state management and fq: prefix."""
 
 import json
 import logging
-import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import redis
 
@@ -11,25 +10,34 @@ from fairque.core.config import FairQueueConfig
 from fairque.core.exceptions import (
     LuaScriptError,
     RedisConnectionError,
+    StateTransitionError,
     TaskSerializationError,
     TaskValidationError,
 )
-from fairque.core.models import Priority, Task
-from fairque.core.pipeline import Executable
+from fairque.core.models import Task, TaskState
+from fairque.core.redis_keys import RedisKeys
 from fairque.utils.lua_manager import LuaScriptManager
 
 logger = logging.getLogger(__name__)
 
 
 class TaskQueue:
-    """Production-ready fair queue implementation using Redis with work stealing and priority scheduling."""
+    """FairQueue with unified state management and dependency resolution.
+
+    This implementation provides:
+    - Unified state management with fq: prefix
+    - Integrated dependency resolution
+    - Enhanced failure tracking (unified DLQ)
+    - TTL-based cleanup
+    - Comprehensive monitoring
+    """
 
     def __init__(
         self,
         config: FairQueueConfig,
         redis_client: Optional[redis.Redis] = None
     ) -> None:
-        """Initialize FairQueue with configuration.
+        """Initialize FairQueue with unified state management.
 
         Args:
             config: FairQueue configuration
@@ -47,7 +55,6 @@ class TaskQueue:
         else:
             try:
                 self.redis = config.create_redis_client()
-                # Test connection
                 self.redis.ping()
             except redis.RedisError as e:
                 raise RedisConnectionError(f"Failed to connect to Redis: {e}") from e
@@ -55,7 +62,7 @@ class TaskQueue:
         # Initialize Lua script manager
         self.lua_manager = LuaScriptManager(self.redis)
 
-        # Load required scripts
+        # Load scripts
         self._load_scripts()
 
         logger.info(f"FairQueue initialized with worker ID: {config.worker.id}")
@@ -63,22 +70,28 @@ class TaskQueue:
     def _load_scripts(self) -> None:
         """Load all required Lua scripts."""
         try:
-            required_scripts = ["push", "pop", "stats"]
-            for script_name in required_scripts:
+            script_files = [
+                "push",
+                "pop",
+                "state_ops"
+            ]
+
+            for script_name in script_files:
                 self.lua_manager.load_script(script_name)
-            logger.debug(f"Loaded {len(required_scripts)} Lua scripts")
+
+            logger.debug(f"Loaded {len(script_files)} Lua scripts")
         except LuaScriptError as e:
             logger.error(f"Failed to load Lua scripts: {e}")
             raise
 
-    def push(self, task: Task) -> Dict[str, Any]:
-        """Push a task to the appropriate queue based on priority.
+    def enqueue(self, task: Task) -> Dict[str, Any]:
+        """Enqueue a task with unified state management and dependency handling.
 
         Args:
-            task: Task to push to queue
+            task: Task to enqueue
 
         Returns:
-            Dictionary with operation result and statistics
+            Dictionary with operation result and state information
 
         Raises:
             TaskValidationError: If task validation fails
@@ -91,16 +104,15 @@ class TaskQueue:
         if not task.user_id:
             raise TaskValidationError("User ID cannot be empty")
 
-        # Convert task to Lua arguments
+        # Convert task to JSON for Lua script
         try:
-            lua_args = task.to_lua_args()
+            task_json = task.to_json()
         except Exception as e:
             raise TaskSerializationError(f"Failed to serialize task: {e}") from e
 
         # Execute push script
-        result = "N/A"  # Default value for result in case of failure
         try:
-            result = self.lua_manager.execute_script("push", args=lua_args)
+            result = self.lua_manager.execute_script("push", args=[task_json])
             response = json.loads(result)
 
             if not response.get("success", False):
@@ -112,21 +124,23 @@ class TaskQueue:
                     "task_id": task.task_id
                 })
 
-            logger.debug(f"Pushed task {task.task_id} for user {task.user_id} with priority {task.priority}")
-            return dict(response)
+            state = response.get("state", "unknown")
+            logger.info(f"Task {task.task_id} enqueued in {state} state for user {task.user_id}")
+            return response
 
         except json.JSONDecodeError as e:
             raise LuaScriptError("push", {
                 "error": "json_decode_error",
                 "details": str(e),
-                "raw_result": str(result)
+                "task_id": task.task_id
             }) from e
 
-    def pop(self, user_list: Optional[List[str]] = None) -> Optional[Task]:
-        """Pop a task from queues using fair scheduling and work stealing.
+    def dequeue(self, user_list: Optional[List[str]] = None, worker_id: Optional[str] = None) -> Optional[Task]:
+        """Dequeue a task with fair scheduling and automatic state transition.
 
         Args:
-            user_list: List of user IDs to check (defaults to worker's assigned_users + steal_targets)
+            user_list: List of user IDs to check (defaults to worker's configuration)
+            worker_id: Worker identifier (defaults to config worker ID)
 
         Returns:
             Task if available, None if no tasks ready
@@ -134,19 +148,22 @@ class TaskQueue:
         Raises:
             LuaScriptError: If Lua script execution fails
         """
-        # Use worker configuration if no user list provided
+        # Use worker configuration if not provided
         if user_list is None:
             user_list = self.config.worker.get_all_users()
+
+        if worker_id is None:
+            worker_id = self.config.worker.id
 
         if not user_list:
             logger.warning("No users to check for tasks")
             return None
 
-        # Convert user list to comma-separated string for Lua script
+        # Convert user list to comma-separated string
         user_list_str = ",".join(user_list)
-        result = "N/A"  # Default value for result in case of failure
+
         try:
-            result = self.lua_manager.execute_script("pop", args=[user_list_str])
+            result = self.lua_manager.execute_script("pop", args=[user_list_str, worker_id])
             response = json.loads(result)
 
             if not response.get("success", False):
@@ -159,70 +176,177 @@ class TaskQueue:
                 })
 
             # Check if task was found
-            task_data = response.get("data")
+            task_data = response.get("task")
             if not task_data:
                 logger.debug("No ready tasks available")
                 return None
 
             # Convert response to Task object
             try:
-                task = Task(
-                    task_id=task_data["task_id"],
-                    user_id=task_data["user_id"],
-                    priority=Priority(task_data["priority"]),
-                    payload=task_data["payload"],
-                    retry_count=task_data["retry_count"],
-                    max_retries=task_data["max_retries"],
-                    created_at=task_data["created_at"],
-                    execute_after=task_data["execute_after"]
-                )
+                task = Task.from_json(task_data["payload"])
 
-                logger.debug(f"Popped task {task.task_id} from user {task_data['selected_user']}")
+                # Update with execution metadata
+                task.state = TaskState.STARTED
+                task.started_at = task_data.get("popped_at")
+
+                selected_user = task_data.get("selected_user")
+                logger.info(f"Dequeued task {task.task_id} from user {selected_user} by worker {worker_id}")
                 return task
 
             except (KeyError, ValueError) as e:
-                raise TaskSerializationError(f"Failed to deserialize task from pop result: {e}") from e
+                raise TaskSerializationError(f"Failed to deserialize task from dequeue result: {e}") from e
 
         except json.JSONDecodeError as e:
             raise LuaScriptError("pop", {
                 "error": "json_decode_error",
                 "details": str(e),
-                "raw_result": str(result)
+                "user_list": user_list
             }) from e
 
-    def get_stats(self) -> Dict[str, Any]:
-        """Get comprehensive queue statistics.
+    def finish_task(self, task_id: str, result: Any = None) -> List[str]:
+        """Mark task as finished and resolve dependencies.
+
+        Args:
+            task_id: Task identifier
+            result: Optional task result
 
         Returns:
-            Dictionary with queue statistics
+            List of task IDs that became ready due to dependency resolution
+
+        Raises:
+            StateTransitionError: If state transition fails
+        """
+        result_json = json.dumps(result) if result is not None else "null"
+
+        try:
+            response_str = self.lua_manager.execute_script("state_ops", args=[
+                "finish", task_id, result_json
+            ])
+            response = json.loads(response_str)
+
+            if not response.get("success", False):
+                error_message = response.get("message", "Unknown error")
+                raise StateTransitionError(f"Failed to finish task {task_id}: {error_message}")
+
+            ready_tasks = response.get("ready_tasks", [])
+            if ready_tasks:
+                logger.info(f"Task {task_id} completion unblocked {len(ready_tasks)} tasks: {ready_tasks}")
+
+            return ready_tasks
+
+        except json.JSONDecodeError as e:
+            raise StateTransitionError(f"Invalid response from finish operation: {e}") from e
+
+    def fail_task(self, task_id: str, error: str, failure_type: str = "failed") -> None:
+        """Mark task as failed with enhanced failure tracking.
+
+        Args:
+            task_id: Task identifier
+            error: Error message
+            failure_type: Type of failure (failed, expired, poisoned, timeout)
+
+        Raises:
+            StateTransitionError: If state transition fails
+        """
+        try:
+            response_str = self.lua_manager.execute_script("state_ops", args=[
+                "fail", task_id, error, failure_type
+            ])
+            response = json.loads(response_str)
+
+            if not response.get("success", False):
+                error_message = response.get("message", "Unknown error")
+                raise StateTransitionError(f"Failed to mark task {task_id} as failed: {error_message}")
+
+            logger.warning(f"Task {task_id} failed with type '{failure_type}': {error}")
+
+        except json.JSONDecodeError as e:
+            raise StateTransitionError(f"Invalid response from fail operation: {e}") from e
+
+    def cancel_task(self, task_id: str, reason: str = "Manually canceled") -> None:
+        """Cancel a task and clean up dependencies.
+
+        Args:
+            task_id: Task identifier
+            reason: Cancellation reason
+
+        Raises:
+            StateTransitionError: If state transition fails
+        """
+        try:
+            response_str = self.lua_manager.execute_script("state_ops", args=[
+                "cancel", task_id, reason
+            ])
+            response = json.loads(response_str)
+
+            if not response.get("success", False):
+                error_message = response.get("message", "Unknown error")
+                raise StateTransitionError(f"Failed to cancel task {task_id}: {error_message}")
+
+            logger.info(f"Task {task_id} canceled: {reason}")
+
+        except json.JSONDecodeError as e:
+            raise StateTransitionError(f"Invalid response from cancel operation: {e}") from e
+
+    def process_scheduled_tasks(self) -> int:
+        """Process scheduled tasks that are ready to run.
+
+        Returns:
+            Number of tasks processed
 
         Raises:
             LuaScriptError: If Lua script execution fails
         """
-        result = "N/A"  # Default value for result in case of failure
         try:
-            result = self.lua_manager.execute_script("stats", args=["get_stats"])
-            response = json.loads(result)
+            response_str = self.lua_manager.execute_script("state_ops", args=["process_scheduled"])
+            response = json.loads(response_str)
 
             if not response.get("success", False):
-                error_code = response.get("error_code", "UNKNOWN")
                 error_message = response.get("message", "Unknown error")
-                raise LuaScriptError("stats", {
-                    "error_code": error_code,
-                    "message": error_message,
-                    "operation": "get_stats"
-                })
+                raise LuaScriptError("state_ops", {"message": error_message})
 
-            return dict(response.get("data", {}))
+            processed = response.get("processed", 0)
+            if processed > 0:
+                logger.info(f"Processed {processed} scheduled tasks")
+
+            return processed
 
         except json.JSONDecodeError as e:
-            raise LuaScriptError("stats", {
-                "error": "json_decode_error",
-                "details": str(e),
-                "raw_result": str(result)
-            }) from e
+            raise LuaScriptError("state_ops", {"error": "json_decode_error", "details": str(e)}) from e
 
-    def get_queue_sizes(self, user_id: str) -> Dict[str, int]:
+    def get_state_stats(self) -> Dict[str, int]:
+        """Get comprehensive state statistics including DEFERRED tasks.
+
+        Returns:
+            Dictionary with state counts
+
+        Raises:
+            LuaScriptError: If Lua script execution fails
+        """
+        try:
+            response_str = self.lua_manager.execute_script("state_ops", args=["stats"])
+            response = json.loads(response_str)
+
+            if not response.get("success", False):
+                error_message = response.get("message", "Unknown error")
+                raise LuaScriptError("state_ops", {"message": error_message})
+
+            base_stats = response.get("stats", {})
+
+            # Break down queued registry into QUEUED and DEFERRED
+            deferred_count = len(self.get_tasks_by_state(TaskState.DEFERRED))
+            ready_count = len(self.get_tasks_by_state(TaskState.QUEUED))
+
+            # Update stats with breakdown
+            base_stats["queued"] = ready_count
+            base_stats["deferred"] = deferred_count
+
+            return base_stats
+
+        except json.JSONDecodeError as e:
+            raise LuaScriptError("state_ops", {"error": "json_decode_error", "details": str(e)}) from e
+
+    def get_user_queue_sizes(self, user_id: str) -> Dict[str, int]:
         """Get queue sizes for a specific user.
 
         Args:
@@ -230,311 +354,141 @@ class TaskQueue:
 
         Returns:
             Dictionary with critical_size, normal_size, and total_size
-
-        Raises:
-            LuaScriptError: If Lua script execution fails
         """
-        result = "N/A"  # Default value for result in case of failure
-        try:
-            result = self.lua_manager.execute_script("stats", args=["get_queue_sizes", user_id])
-            response = json.loads(result)
+        critical_key = RedisKeys.user_critical_queue(user_id)
+        normal_key = RedisKeys.user_normal_queue(user_id)
 
-            if not response.get("success", False):
-                error_code = response.get("error_code", "UNKNOWN")
-                error_message = response.get("message", "Unknown error")
-                raise LuaScriptError("stats", {
-                    "error_code": error_code,
-                    "message": error_message,
-                    "operation": "get_queue_sizes",
-                    "user_id": user_id
-                })
+        critical_size = self.redis.llen(critical_key)
+        normal_size = self.redis.zcard(normal_key)
 
-            # Convert to dict[str, int] explicitly
-            data = response.get("data", {})
-            return {str(k): int(v) for k, v in data.items()}
+        return {
+            "critical_size": critical_size,
+            "normal_size": normal_size,
+            "total_size": critical_size + normal_size
+        }
 
-        except json.JSONDecodeError as e:
-            raise LuaScriptError("stats", {
-                "error": "json_decode_error",
-                "details": str(e),
-                "raw_result": str(result)
-            }) from e
-
-    def get_batch_queue_sizes(self, user_list: Optional[List[str]] = None) -> Dict[str, Any]:
-        """Get queue sizes for multiple users.
-
-        Args:
-            user_list: List of user IDs (defaults to worker's assigned_users + steal_targets)
-
-        Returns:
-            Dictionary with per-user queue sizes and totals
-
-        Raises:
-            LuaScriptError: If Lua script execution fails
-        """
-        if user_list is None:
-            user_list = self.config.worker.get_all_users()
-
-        if not user_list:
-            return {"totals": {"critical_size": 0, "normal_size": 0, "total_size": 0}}
-
-        user_list_str = ",".join(user_list)
-        result = "N/A"  # Default value for result in case of failure
-        try:
-            result = self.lua_manager.execute_script("stats", args=["get_batch_sizes", user_list_str])
-            response = json.loads(result)
-
-            if not response.get("success", False):
-                error_code = response.get("error_code", "UNKNOWN")
-                error_message = response.get("message", "Unknown error")
-                raise LuaScriptError("stats", {
-                    "error_code": error_code,
-                    "message": error_message,
-                    "operation": "get_batch_sizes",
-                    "user_list": user_list
-                })
-
-            return dict(response.get("data", {}))
-
-        except json.JSONDecodeError as e:
-            raise LuaScriptError("stats", {
-                "error": "json_decode_error",
-                "details": str(e),
-                "raw_result": str(result)
-            }) from e
-
-    def get_health(self) -> Dict[str, Any]:
-        """Get health check information.
-
-        Returns:
-            Dictionary with health status and metrics
-
-        Raises:
-            LuaScriptError: If Lua script execution fails
-        """
-        result = "N/A"  # Default value for result in case of failure
-        try:
-            result = self.lua_manager.execute_script("stats", args=["get_health"])
-            response = json.loads(result)
-
-            if not response.get("success", False):
-                error_code = response.get("error_code", "UNKNOWN")
-                error_message = response.get("message", "Unknown error")
-                raise LuaScriptError("stats", {
-                    "error_code": error_code,
-                    "message": error_message,
-                    "operation": "get_health"
-                })
-
-            return dict(response.get("data", {}))
-
-        except json.JSONDecodeError as e:
-            raise LuaScriptError("stats", {
-                "error": "json_decode_error",
-                "details": str(e),
-                "raw_result": str(result)
-            }) from e
-
-    def get_metrics(self, level: str = "basic", target: Optional[str] = None) -> Dict[str, Any]:
-        """Get metrics with specified granularity level.
-
-        Args:
-            level: Granularity level ("basic", "detailed", "worker", "queue")
-            target: Target identifier (user_id, worker_id, or None for "all")
-
-        Returns:
-            Dictionary with requested metrics
-
-        Raises:
-            LuaScriptError: If Lua script execution fails
-        """
-        result = "N/A"  # Default value for result in case of failure
-        try:
-            args = ["get_metrics", level]
-            if target is not None:
-                args.append(target)
-
-            result = self.lua_manager.execute_script("stats", args=args)
-            response = json.loads(result)
-
-            if not response.get("success", False):
-                error_code = response.get("error_code", "UNKNOWN")
-                error_message = response.get("message", "Unknown error")
-                raise LuaScriptError("stats", {
-                    "error_code": error_code,
-                    "message": error_message,
-                    "operation": "get_metrics",
-                    "level": level,
-                    "target": target
-                })
-
-            return dict(response.get("data", {}))
-
-        except json.JSONDecodeError as e:
-            raise LuaScriptError("stats", {
-                "error": "json_decode_error",
-                "details": str(e),
-                "raw_result": str(result)
-            }) from e
-
-    def enqueue(self, executable: Union[Task, "Executable"]) -> List[Dict[str, Any]]:
-        """Enqueue a task or pipeline/taskgroup with dependency expansion.
-
-        Args:
-            executable: Task, Pipeline, or TaskGroup to enqueue
-
-        Returns:
-            List of operation results for each task that was enqueued
-
-        Raises:
-            TaskValidationError: If task validation fails
-            ValueError: If pipeline would create cycles
-        """
-        from fairque.core.pipeline import Executable
-
-        # Handle single task
-        if isinstance(executable, Task):
-            result = self.push(executable)
-            return [result]
-
-        # Handle pipeline/taskgroup
-        if isinstance(executable, Executable):
-            # Expand pipeline into individual tasks
-            if hasattr(executable, 'expand'):
-                # Pipeline with expand method
-                expanded_tasks = executable.expand()
-            else:
-                # Simple executable (TaskWrapper, etc.)
-                expanded_tasks = executable.get_tasks()
-
-            # Validate no cycles in expanded tasks
-            self._validate_task_dependencies(expanded_tasks)
-
-            # Enqueue all tasks
-            results = []
-            for task in expanded_tasks:
-                result = self.push(task)
-                results.append(result)
-                logger.debug(f"Enqueued expanded task {task.task_id} from pipeline")
-
-            return results
-
-        raise TypeError(f"Cannot enqueue object of type {type(executable)}")
-
-    def _validate_task_dependencies(self, tasks: List[Task]) -> None:
-        """Validate that tasks don't create dependency cycles.
-
-        Args:
-            tasks: List of tasks to validate
-
-        Raises:
-            ValueError: If cycles are detected
-        """
-        from fairque.core.models import detect_dependency_cycle
-
-        # Build dependency graph
-        task_dependencies = {}
-        for task in tasks:
-            task_dependencies[task.task_id] = task.depends_on.copy()
-
-        # Check each task for cycles
-        for task in tasks:
-            if detect_dependency_cycle(task_dependencies, task.task_id, task.depends_on):
-                raise ValueError(f"Task {task.task_id} would create a dependency cycle")
-
-    def push_batch(self, tasks: List[Task]) -> List[Dict[str, Any]]:
-        """Push multiple tasks efficiently.
-
-        Args:
-            tasks: List of tasks to push
-
-        Returns:
-            List of operation results
-
-        Raises:
-            TaskValidationError: If any task validation fails
-        """
-        if not tasks:
-            return []
-
-        results = []
-
-        # Use pipeline for efficiency if enabled
-        if self.config.queue.enable_pipeline_optimization and len(tasks) > 1:
-            # TODO: Implement pipeline-based batch push
-            # For now, fall back to individual pushes
-            pass
-
-        # Individual push operations
-        for task in tasks:
-            try:
-                result = self.push(task)
-                results.append(result)
-            except Exception as e:
-                # Include error in results for batch processing
-                results.append({
-                    "success": False,
-                    "error": str(e),
-                    "task_id": getattr(task, "task_id", "unknown")
-                })
-
-        return results
-
-    def delete_task(self, task_id: str) -> bool:
-        """Delete a task and its data.
+    def get_dependency_info(self, task_id: str) -> Dict[str, List[str]]:
+        """Get dependency information for a task.
 
         Args:
             task_id: Task identifier
 
         Returns:
-            True if task was deleted, False if not found
+            Dictionary with blocking and blocked_by task lists
         """
-        try:
-            # Delete task hash
-            deleted = self.redis.delete(f"task:{task_id}")
-            return bool(deleted)
-        except redis.RedisError as e:
-            logger.error(f"Failed to delete task {task_id}: {e}")
-            return False
+        waiting_key = RedisKeys.deps_waiting(task_id)
+        blocked_key = RedisKeys.deps_blocked(task_id)
 
-    def cleanup_expired_tasks(self, max_age_seconds: int = 86400) -> int:
-        """Clean up old completed tasks (maintenance operation).
+        return {
+            "blocking": list(self.redis.smembers(waiting_key)),
+            "blocked_by": list(self.redis.smembers(blocked_key))
+        }
+
+    def get_tasks_by_state(self, state: TaskState, limit: int = 100) -> List[str]:
+        """Get task IDs in specific state.
 
         Args:
-            max_age_seconds: Maximum age for task data retention
+            state: Task state to query
+            limit: Maximum number of tasks to return
 
         Returns:
-            Number of tasks cleaned up
+            List of task IDs in the specified state
         """
-        # This is a simple cleanup - in production you might want more sophisticated logic
-        current_time = time.time()
-        cutoff_time = current_time - max_age_seconds
+        if state in [TaskState.QUEUED, TaskState.DEFERRED]:
+            # Both QUEUED and DEFERRED tasks are stored in fq:state:queued
+            # Filter by actual state field in task data
+            all_queued = self.redis.zrange(RedisKeys.state_registry("queued"), 0, -1)
+            filtered_tasks = []
 
-        # Scan for old task keys (this is a simplified implementation)
-        # In production, you might want to use Redis streams or separate cleanup tracking
+            for task_id in all_queued:
+                if len(filtered_tasks) >= limit:
+                    break
 
-        cleanup_count = 0
-        try:
-            for key in self.redis.scan_iter(match="task:*"):
-                # This is inefficient for large datasets - consider batch operations
-                created_at = self.redis.hget(key, "created_at")
-                if created_at is None:
-                    logger.warning(f"Task {key} has no created_at field, skipping cleanup")
+                task_key = RedisKeys.task_data(task_id)
+                task_state = self.redis.hget(task_key, "state")
+
+                if task_state == state.value:
+                    filtered_tasks.append(task_id)
+
+            return filtered_tasks
+        else:
+            # Other states have their own registries
+            key = RedisKeys.state_registry(state.value)
+            return self.redis.zrange(key, 0, limit-1)
+
+    def get_failed_tasks(self, failure_type: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get failed tasks with optional filtering by failure type.
+
+        Args:
+            failure_type: Optional filter by failure type
+            limit: Maximum number of tasks to return
+
+        Returns:
+            List of failed task information
+        """
+        failed_task_ids = self.get_tasks_by_state(TaskState.FAILED, limit)
+        failed_tasks = []
+
+        for task_id in failed_task_ids:
+            task_key = RedisKeys.task_data(task_id)
+            task_data = self.redis.hgetall(task_key)
+
+            if task_data:
+                # Filter by failure type if specified
+                if failure_type and task_data.get("failure_type") != failure_type:
                     continue
 
-                # Ensure created_at is a string and convert to float
-                created_at_fp = float(str(created_at))
-                if created_at_fp < cutoff_time:
-                    self.redis.delete(key)
-                    cleanup_count += 1
+                failed_tasks.append({
+                    "task_id": task_id,
+                    "failure_type": task_data.get("failure_type", "failed"),
+                    "error_message": task_data.get("error_message", ""),
+                    "failed_at": float(task_data.get("finished_at", 0)),
+                    "retry_count": int(task_data.get("retry_count", 0)),
+                    "user_id": task_data.get("user_id", "")
+                })
 
-        except redis.RedisError as e:
-            logger.error(f"Error during cleanup: {e}")
+        return failed_tasks
 
-        if cleanup_count > 0:
-            logger.info(f"Cleaned up {cleanup_count} expired tasks")
+    def cleanup_expired_tasks(self, state: Optional[TaskState] = None) -> Dict[str, int]:
+        """Clean up expired tasks with TTL-based removal.
 
-        return cleanup_count
+        Args:
+            state: Optional specific state to clean (defaults to all terminal states)
+
+        Returns:
+            Dictionary with cleanup counts per state
+        """
+        results = {}
+
+        # Define states to clean with their TTL
+        states_to_clean = {}
+        if state:
+            ttl = getattr(self.config.state, f"{state.value}_ttl", 86400)
+            states_to_clean[state.value] = ttl
+        else:
+            states_to_clean = {
+                "finished": getattr(self.config.state, "finished_ttl", 86400),
+                "failed": getattr(self.config.state, "failed_ttl", 604800),
+                "canceled": getattr(self.config.state, "canceled_ttl", 3600)
+            }
+
+        for state_name, ttl in states_to_clean.items():
+            try:
+                response_str = self.lua_manager.execute_script("state_ops", args=[
+                    "cleanup", state_name, str(ttl)
+                ])
+                response = json.loads(response_str)
+                results[state_name] = response.get("removed", 0)
+
+            except (LuaScriptError, json.JSONDecodeError) as e:
+                logger.error(f"Failed to cleanup {state_name} state: {e}")
+                results[state_name] = 0
+
+        total_cleaned = sum(results.values())
+        if total_cleaned > 0:
+            logger.info(f"Cleaned up {total_cleaned} expired tasks: {results}")
+
+        return results
 
     def close(self) -> None:
         """Close Redis connection and cleanup resources."""
@@ -552,3 +506,5 @@ class TaskQueue:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Context manager exit."""
         self.close()
+
+
