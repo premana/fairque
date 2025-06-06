@@ -220,7 +220,6 @@ class TestAsyncVsSyncPerformance:
         # Measure async implementation
         await async_redis_client.flushdb()
         initial_memory = process.memory_info().rss / 1024 / 1024  # MB
-        initial_cpu = process.cpu_percent()
 
         async_start = time.perf_counter()
         for i in range(num_operations):

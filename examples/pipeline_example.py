@@ -130,11 +130,11 @@ def main():
             user_id="user:pipeline"
         )
         v = validate_data()
-        l = load_data()
+        load_task = load_data()
         n = send_notification()
 
         # Complex pipeline: extract >> (transform1 | transform2) >> validate >> load >> notify
-        mixed_pipeline = e >> (t1 | t2) >> v >> l >> n
+        mixed_pipeline = e >> (t1 | t2) >> v >> load_task >> n
 
         results = queue.enqueue(mixed_pipeline)
         print(f"Enqueued {len(results)} tasks from mixed operator pipeline\n")

@@ -33,7 +33,7 @@ class TestPriority:
     def test_critical_priority_weight_error(self) -> None:
         """Test that CRITICAL priority raises error for weight."""
         with pytest.raises(ValueError, match="Critical priority does not use weight calculation"):
-            Priority.CRITICAL.weight
+            _ = Priority.CRITICAL.weight
 
     def test_is_critical(self) -> None:
         """Test is_critical property."""
@@ -316,7 +316,6 @@ class TestCalculateScore:
     def test_calculate_score_normal_priority(self) -> None:
         """Test score calculation for normal priorities."""
         created_at = time.time() - 100  # 100 seconds ago
-        current_time = time.time()
 
         # High priority task (weight = 0.8)
         task = Task(

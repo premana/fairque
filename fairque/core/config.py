@@ -325,7 +325,7 @@ def _load_config_file(filename: str, config_dir: Optional[Path] = None) -> Dict[
     file_path = config_dir / filename
 
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         return data or {}
     except FileNotFoundError:
@@ -474,6 +474,35 @@ def load_scheduler_config(
 
 # Legacy support for existing FairQueueConfig
 @dataclass
+class StateConfig:
+    """Task state management configuration."""
+
+    finished_ttl: int = 86400  # 1 day
+    failed_ttl: int = 604800   # 7 days
+    canceled_ttl: int = 3600   # 1 hour
+
+    def validate(self) -> None:
+        """Validate state configuration parameters.
+
+        Raises:
+            ConfigurationError: If configuration is invalid
+        """
+        if self.finished_ttl <= 0:
+            raise ConfigurationError("finished_ttl must be positive")
+        if self.failed_ttl <= 0:
+            raise ConfigurationError("failed_ttl must be positive")
+        if self.canceled_ttl <= 0:
+            raise ConfigurationError("canceled_ttl must be positive")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary representation."""
+        return {
+            "finished_ttl": self.finished_ttl,
+            "failed_ttl": self.failed_ttl,
+            "canceled_ttl": self.canceled_ttl
+        }
+
+@dataclass
 class QueueConfig:
     """Queue configuration with performance settings (legacy support)."""
 
@@ -544,6 +573,7 @@ class FairQueueConfig:
     redis: RedisConfig
     workers: List[WorkerConfig]
     queue: QueueConfig = field(default_factory=QueueConfig)
+    state: StateConfig = field(default_factory=StateConfig)
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization.
@@ -708,6 +738,9 @@ class FairQueueConfig:
             # Parse Queue configuration
             queue_config = QueueConfig(**data.get("queue", {}))
 
+            # Parse State configuration
+            state_config = StateConfig(**data.get("state", {}))
+
             # Parse Worker configuration(s)
             workers = []
 
@@ -741,7 +774,8 @@ class FairQueueConfig:
             return cls(
                 redis=redis_config,
                 workers=workers,
-                queue=queue_config
+                queue=queue_config,
+                state=state_config
             )
 
         except TypeError as e:
@@ -763,7 +797,7 @@ class FairQueueConfig:
             ConfigurationError: If YAML loading or parsing fails
         """
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = yaml.safe_load(f)
         except (OSError, yaml.YAMLError) as e:
             raise ConfigurationError(f"Failed to load configuration from {path}: {e}") from e
@@ -781,7 +815,7 @@ class FairQueueConfig:
         Returns:
             Dictionary representation of configuration
         """
-        result = {
+        result: dict[str, Any] = {
             "redis": {
                 "host": self.redis.host,
                 "port": self.redis.port,
@@ -811,6 +845,11 @@ class FairQueueConfig:
                 "pipeline_timeout": self.queue.pipeline_timeout,
                 "queue_cleanup_interval": self.queue.queue_cleanup_interval,
                 "stats_aggregation_interval": self.queue.stats_aggregation_interval
+            },
+            "state": {
+                "finished_ttl": self.state.finished_ttl,
+                "failed_ttl": self.state.failed_ttl,
+                "canceled_ttl": self.state.canceled_ttl
             },
             "workers": []
         }
@@ -865,6 +904,7 @@ class FairQueueConfig:
         """
         self.redis.validate()
         self.queue.validate()
+        self.state.validate()
         self.validate_workers()
 
         # Validate each worker

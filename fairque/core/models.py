@@ -527,6 +527,54 @@ class Task:
             execute_after=time.time() + delay,
         )
 
+    # Serialization methods
+    def to_json(self) -> str:
+        """Convert task to JSON string.
+
+        Returns:
+            JSON string representation of the task
+
+        Raises:
+            TaskSerializationError: If serialization fails
+        """
+        try:
+            task_dict = dataclasses.asdict(self)
+            # Remove non-serializable fields
+            task_dict.pop('func', None)
+            task_dict.pop('_xcom_manager', None)
+            # Convert enums to their values
+            if 'priority' in task_dict:
+                task_dict['priority'] = task_dict['priority'].value
+            if 'state' in task_dict:
+                task_dict['state'] = task_dict['state'].value
+            return json.dumps(task_dict)
+        except (TypeError, ValueError) as e:
+            raise TaskSerializationError(f"Failed to serialize task to JSON: {e}") from e
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "Task":
+        """Create task from JSON string.
+
+        Args:
+            json_str: JSON string representation of the task
+
+        Returns:
+            Task instance
+
+        Raises:
+            TaskSerializationError: If deserialization fails
+        """
+        try:
+            task_dict = json.loads(json_str)
+            # Convert priority and state back to enums
+            if 'priority' in task_dict:
+                task_dict['priority'] = Priority(task_dict['priority'])
+            if 'state' in task_dict:
+                task_dict['state'] = TaskState(task_dict['state'])
+            return cls(**task_dict)
+        except (TypeError, ValueError, json.JSONDecodeError) as e:
+            raise TaskSerializationError(f"Failed to deserialize task from JSON: {e}") from e
+
     # XCom methods
     def set_xcom_manager(self, xcom_manager: 'XComManager') -> None:
         """Set XCom manager reference (called by TaskHandler)."""

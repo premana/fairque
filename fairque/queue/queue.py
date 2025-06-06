@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 import redis
 
@@ -113,7 +113,7 @@ class TaskQueue:
         # Execute push script
         try:
             result = self.lua_manager.execute_script("push", args=[task_json])
-            response = json.loads(result)
+            response: Dict[str, Any] = json.loads(result)
 
             if not response.get("success", False):
                 error_code = response.get("error_code", "UNKNOWN")
@@ -164,7 +164,7 @@ class TaskQueue:
 
         try:
             result = self.lua_manager.execute_script("pop", args=[user_list_str, worker_id])
-            response = json.loads(result)
+            response: Dict[str, Any] = json.loads(result)
 
             if not response.get("success", False):
                 error_code = response.get("error_code", "UNKNOWN")
@@ -222,13 +222,13 @@ class TaskQueue:
             response_str = self.lua_manager.execute_script("state_ops", args=[
                 "finish", task_id, result_json
             ])
-            response = json.loads(response_str)
+            response: Dict[str, Any] = json.loads(response_str)
 
             if not response.get("success", False):
                 error_message = response.get("message", "Unknown error")
                 raise StateTransitionError(f"Failed to finish task {task_id}: {error_message}")
 
-            ready_tasks = response.get("ready_tasks", [])
+            ready_tasks: List[str] = response.get("ready_tasks", [])
             if ready_tasks:
                 logger.info(f"Task {task_id} completion unblocked {len(ready_tasks)} tasks: {ready_tasks}")
 
@@ -252,7 +252,7 @@ class TaskQueue:
             response_str = self.lua_manager.execute_script("state_ops", args=[
                 "fail", task_id, error, failure_type
             ])
-            response = json.loads(response_str)
+            response: Dict[str, Any] = json.loads(response_str)
 
             if not response.get("success", False):
                 error_message = response.get("message", "Unknown error")
@@ -277,7 +277,7 @@ class TaskQueue:
             response_str = self.lua_manager.execute_script("state_ops", args=[
                 "cancel", task_id, reason
             ])
-            response = json.loads(response_str)
+            response: Dict[str, Any] = json.loads(response_str)
 
             if not response.get("success", False):
                 error_message = response.get("message", "Unknown error")
@@ -299,13 +299,13 @@ class TaskQueue:
         """
         try:
             response_str = self.lua_manager.execute_script("state_ops", args=["process_scheduled"])
-            response = json.loads(response_str)
+            response: Dict[str, Any] = json.loads(response_str)
 
             if not response.get("success", False):
                 error_message = response.get("message", "Unknown error")
                 raise LuaScriptError("state_ops", {"message": error_message})
 
-            processed = response.get("processed", 0)
+            processed: int = response.get("processed", 0)
             if processed > 0:
                 logger.info(f"Processed {processed} scheduled tasks")
 
@@ -325,17 +325,17 @@ class TaskQueue:
         """
         try:
             response_str = self.lua_manager.execute_script("state_ops", args=["stats"])
-            response = json.loads(response_str)
+            response: Dict[str, Any] = json.loads(response_str)
 
             if not response.get("success", False):
                 error_message = response.get("message", "Unknown error")
                 raise LuaScriptError("state_ops", {"message": error_message})
 
-            base_stats = response.get("stats", {})
+            base_stats: Dict[str, int] = response.get("stats", {})
 
             # Break down queued registry into QUEUED and DEFERRED
-            deferred_count = len(self.get_tasks_by_state(TaskState.DEFERRED))
-            ready_count = len(self.get_tasks_by_state(TaskState.QUEUED))
+            deferred_count: int = len(self.get_tasks_by_state(TaskState.DEFERRED))
+            ready_count: int = len(self.get_tasks_by_state(TaskState.QUEUED))
 
             # Update stats with breakdown
             base_stats["queued"] = ready_count
@@ -358,8 +358,8 @@ class TaskQueue:
         critical_key = RedisKeys.user_critical_queue(user_id)
         normal_key = RedisKeys.user_normal_queue(user_id)
 
-        critical_size = self.redis.llen(critical_key)
-        normal_size = self.redis.zcard(normal_key)
+        critical_size: int = cast(int, self.redis.llen(critical_key))
+        normal_size: int = cast(int, self.redis.zcard(normal_key))
 
         return {
             "critical_size": critical_size,
@@ -380,8 +380,8 @@ class TaskQueue:
         blocked_key = RedisKeys.deps_blocked(task_id)
 
         return {
-            "blocking": list(self.redis.smembers(waiting_key)),
-            "blocked_by": list(self.redis.smembers(blocked_key))
+            "blocking": list(cast(set[str], self.redis.smembers(waiting_key))),
+            "blocked_by": list(cast(set[str], self.redis.smembers(blocked_key)))
         }
 
     def get_tasks_by_state(self, state: TaskState, limit: int = 100) -> List[str]:
@@ -397,8 +397,8 @@ class TaskQueue:
         if state in [TaskState.QUEUED, TaskState.DEFERRED]:
             # Both QUEUED and DEFERRED tasks are stored in fq:state:queued
             # Filter by actual state field in task data
-            all_queued = self.redis.zrange(RedisKeys.state_registry("queued"), 0, -1)
-            filtered_tasks = []
+            all_queued = list(cast(list[str], self.redis.zrange(RedisKeys.state_registry("queued"), 0, -1)))
+            filtered_tasks: List[str] = []
 
             for task_id in all_queued:
                 if len(filtered_tasks) >= limit:
@@ -414,7 +414,7 @@ class TaskQueue:
         else:
             # Other states have their own registries
             key = RedisKeys.state_registry(state.value)
-            return self.redis.zrange(key, 0, limit-1)
+            return list(cast(list[str], self.redis.zrange(key, 0, limit-1)))
 
     def get_failed_tasks(self, failure_type: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         """Get failed tasks with optional filtering by failure type.
@@ -427,11 +427,11 @@ class TaskQueue:
             List of failed task information
         """
         failed_task_ids = self.get_tasks_by_state(TaskState.FAILED, limit)
-        failed_tasks = []
+        failed_tasks: List[Dict[str, Any]] = []
 
         for task_id in failed_task_ids:
             task_key = RedisKeys.task_data(task_id)
-            task_data = self.redis.hgetall(task_key)
+            task_data: Dict[str, Any] = cast(Dict[str, Any], self.redis.hgetall(task_key))
 
             if task_data:
                 # Filter by failure type if specified
@@ -477,7 +477,7 @@ class TaskQueue:
                 response_str = self.lua_manager.execute_script("state_ops", args=[
                     "cleanup", state_name, str(ttl)
                 ])
-                response = json.loads(response_str)
+                response: Dict[str, Any] = json.loads(response_str)
                 results[state_name] = response.get("removed", 0)
 
             except (LuaScriptError, json.JSONDecodeError) as e:
@@ -489,6 +489,56 @@ class TaskQueue:
             logger.info(f"Cleaned up {total_cleaned} expired tasks: {results}")
 
         return results
+
+    # Backward compatibility aliases
+    def push(self, task: Task) -> Dict[str, Any]:
+        """Alias for enqueue method for backward compatibility."""
+        return self.enqueue(task)
+
+    def push_batch(self, tasks: List[Task]) -> List[Dict[str, Any]]:
+        """Push multiple tasks in a batch."""
+        results = []
+        for task in tasks:
+            results.append(self.enqueue(task))
+        return results
+
+    def pop(self, user_list: Optional[List[str]] = None, worker_id: Optional[str] = None) -> Optional[Task]:
+        """Alias for dequeue method for backward compatibility."""
+        return self.dequeue(user_list, worker_id)
+
+    def delete_task(self, task_id: str) -> bool:
+        """Delete a task permanently."""
+        try:
+            # Remove from all possible locations
+            result = self.lua_manager.execute_script('state_ops', args=['delete_task', task_id])
+            return bool(result)
+        except redis.RedisError as e:
+            logger.error(f"Failed to delete task {task_id}: {e}")
+            return False
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get queue metrics."""
+        try:
+            stats = self.get_state_stats()
+            return {
+                "total_tasks": sum(stats.values()),
+                "state_counts": stats,
+                "timestamp": __import__('time').time()
+            }
+        except redis.RedisError as e:
+            logger.error(f"Failed to get metrics: {e}")
+            return {"error": str(e)}
+
+    def get_queue_sizes(self) -> Dict[str, int]:
+        """Alias for get_state_stats for backward compatibility."""
+        return self.get_state_stats()
+
+    def get_batch_queue_sizes(self, user_ids: List[str]) -> Dict[str, Dict[str, int]]:
+        """Get queue sizes for multiple users."""
+        result = {}
+        for user_id in user_ids:
+            result[user_id] = self.get_user_queue_sizes(user_id)
+        return result
 
     def close(self) -> None:
         """Close Redis connection and cleanup resources."""

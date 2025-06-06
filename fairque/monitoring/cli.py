@@ -46,7 +46,7 @@ class FairqueInfo:
                 if specific_users:
                     users_to_check = specific_users
                 else:
-                    queue_metrics = queue.get_metrics("queue", "all")
+                    queue_metrics = queue.get_metrics()
                     users_to_check = list(queue_metrics.get("queues", {}).keys())
 
                 if HAS_RICH and self.console:
@@ -72,7 +72,7 @@ class FairqueInfo:
         max_queue_size = max(1, max([self._get_user_total_size(queue, user) for user in users] + [1]))
 
         for user in users:
-            sizes = queue.get_queue_sizes(user)
+            sizes = queue.get_queue_sizes()
             critical_size = sizes.get("critical_size", 0)
             normal_size = sizes.get("normal_size", 0)
             total_size = critical_size + normal_size
@@ -111,7 +111,7 @@ class FairqueInfo:
         max_queue_size = max(1, max([self._get_user_total_size(queue, user) for user in users] + [1]))
 
         for user in users:
-            sizes = queue.get_queue_sizes(user)
+            sizes = queue.get_queue_sizes()
             critical_size = sizes.get("critical_size", 0)
             normal_size = sizes.get("normal_size", 0)
             total_size = critical_size + normal_size
@@ -135,7 +135,7 @@ class FairqueInfo:
     def _get_user_total_size(self, queue: TaskQueue, user: str) -> int:
         """Get total queue size for a user."""
         try:
-            sizes = queue.get_queue_sizes(user)
+            sizes = queue.get_queue_sizes()
             return sizes.get("critical_size", 0) + sizes.get("normal_size", 0)
         except Exception:
             return 0
@@ -168,7 +168,7 @@ class FairqueInfo:
                 if specific_users:
                     users_to_check = specific_users
                 else:
-                    queue_metrics = queue.get_metrics("queue", "all")
+                    queue_metrics = queue.get_metrics()
                     users_to_check = list(queue_metrics.get("queues", {}).keys())
 
                 table = Table(title=f"FairQueue Status - {time.strftime('%H:%M:%S')}", box=box.ROUNDED)
@@ -182,7 +182,7 @@ class FairqueInfo:
                 max_queue_size = max(1, max([self._get_user_total_size(queue, user) for user in users_to_check] + [1]))
 
                 for user in users_to_check:
-                    sizes = queue.get_queue_sizes(user)
+                    sizes = queue.get_queue_sizes()
                     critical_size = sizes.get("critical_size", 0)
                     normal_size = sizes.get("normal_size", 0)
                     total_size = critical_size + normal_size
@@ -307,7 +307,7 @@ def main() -> None:
             if args.detailed:
                 # Show detailed information
                 with TaskQueue(fairque_info.config) as queue:
-                    detailed_metrics = queue.get_metrics("detailed")
+                    detailed_metrics = queue.get_metrics()
                     print("Detailed FairQueue Metrics:")
                     print("=" * 40)
                     for key, value in detailed_metrics.items():

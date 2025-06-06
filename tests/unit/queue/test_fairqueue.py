@@ -60,7 +60,7 @@ class TestFairQueueBasics:
         assert result["data"]["priority"] == 3
         # Normal tasks have score
         assert "score" in result["data"]
-        assert isinstance(result["data"]["score"], (int, float))
+        assert isinstance(result["data"]["score"], int | float)
 
     def test_push_task_validation_error(self, fairqueue: TaskQueue, sample_payload: Dict[str, Any]) -> None:
         """Test task push with validation error."""

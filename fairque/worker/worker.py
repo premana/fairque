@@ -454,7 +454,13 @@ class Worker:
         if self.stats["last_task_time"] > 0 and time_since_last_task > 300:
             # But only if there are tasks available
             try:
-                queue_sizes = self.queue.get_batch_queue_sizes()
+                # Get worker config (assume first worker for now)
+                worker_config = self.config.workers[0] if self.config.workers else None
+                if worker_config:
+                    all_users = worker_config.assigned_users + worker_config.steal_targets
+                else:
+                    all_users = []
+                queue_sizes = self.queue.get_batch_queue_sizes(all_users)
                 total_tasks = queue_sizes.get("totals", {}).get("total_size", 0)
                 if total_tasks > 0:
                     return False
