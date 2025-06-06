@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Union, cast
 
 import redis
 
+from .redis_keys import RedisKeys
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,8 +68,8 @@ class XComManager:
             namespace: Storage namespace (e.g., "default", "workflow_001")
             ttl_seconds: TTL in seconds (0=no TTL, >0=specific TTL)
         """
-        redis_key = f"fairque:xcom:{user_id}:{namespace}:{key}"
-        namespace_keys_key = f"fairque:xcom:namespace_keys:{user_id}:{namespace}"
+        redis_key = RedisKeys.xcom_data(user_id, namespace, key)
+        namespace_keys_key = RedisKeys.xcom_namespace_keys(user_id, namespace)
 
         pipe = self.redis.pipeline()
 
@@ -111,13 +113,13 @@ class XComManager:
         """
         if namespace:
             # Get from specific namespace
-            redis_key = f"fairque:xcom:{user_id}:{namespace}:{key}"
+            redis_key = RedisKeys.xcom_data(user_id, namespace, key)
             data = self.redis.get(redis_key)
             if not data:
                 raise KeyError(f"XCom key not found or expired: {key} (namespace: {namespace})")
         else:
             # Search all namespaces for this key (get latest)
-            pattern = f"fairque:xcom:{user_id}:*:{key}"
+            pattern = f"{RedisKeys.XCOM_PREFIX}{user_id}:*:{key}"
             keys = cast(List[Union[str, bytes]], self.redis.keys(pattern))
             if not keys:
                 raise KeyError(f"XCom key not found: {key}")
@@ -142,7 +144,7 @@ class XComManager:
         Returns:
             Dictionary mapping keys to values
         """
-        pattern = f"fairque:xcom:{user_id}:{namespace}:*"
+        pattern = f"{RedisKeys.XCOM_PREFIX}{user_id}:{namespace}:*"
         keys = cast(List[Union[str, bytes]], self.redis.keys(pattern))
 
         if not keys:
@@ -175,7 +177,7 @@ class XComManager:
         Returns:
             Number of entries cleaned up
         """
-        pattern = f"fairque:xcom:{user_id}:{namespace}:*"
+        pattern = f"{RedisKeys.XCOM_PREFIX}{user_id}:{namespace}:*"
         keys = cast(List[Union[str, bytes]], self.redis.keys(pattern))
 
         if not keys:
@@ -186,7 +188,7 @@ class XComManager:
             pipe.delete(key)
 
         # Also delete namespace tracking key
-        namespace_keys_key = f"fairque:xcom:namespace_keys:{user_id}:{namespace}"
+        namespace_keys_key = RedisKeys.xcom_namespace_keys(user_id, namespace)
         pipe.delete(namespace_keys_key)
 
         pipe.execute()
@@ -197,7 +199,7 @@ class XComManager:
 
     def list_namespaces(self, user_id: str) -> List[str]:
         """List all available namespaces for a user."""
-        pattern = f"fairque:xcom:{user_id}:*"
+        pattern = f"{RedisKeys.XCOM_PREFIX}{user_id}:*"
         keys = cast(List[Union[str, bytes]], self.redis.keys(pattern))
 
         namespaces = set()
@@ -212,7 +214,7 @@ class XComManager:
 
     def list_keys_in_namespace(self, namespace: str, user_id: str) -> List[str]:
         """List all keys in a specific namespace."""
-        pattern = f"fairque:xcom:{user_id}:{namespace}:*"
+        pattern = f"{RedisKeys.XCOM_PREFIX}{user_id}:{namespace}:*"
         keys = cast(List[Union[str, bytes]], self.redis.keys(pattern))
 
         xcom_keys = []

@@ -107,6 +107,33 @@ class RedisKeys:
         """
         return f"{RedisKeys.XCOM_PREFIX}{key}"
 
+    @staticmethod
+    def xcom_data(user_id: str, namespace: str, key: str) -> str:
+        """Get Redis key for XCom data storage with namespace.
+
+        Args:
+            user_id: User identifier
+            namespace: XCom namespace
+            key: XCom key name
+
+        Returns:
+            Redis key for namespaced XCom data
+        """
+        return f"{RedisKeys.XCOM_PREFIX}{user_id}:{namespace}:{key}"
+
+    @staticmethod
+    def xcom_namespace_keys(user_id: str, namespace: str) -> str:
+        """Get Redis key for XCom namespace tracking.
+
+        Args:
+            user_id: User identifier
+            namespace: XCom namespace
+
+        Returns:
+            Redis key for namespace tracking set
+        """
+        return f"{RedisKeys.XCOM_PREFIX}namespace_keys:{user_id}:{namespace}"
+
     @classmethod
     def get_all_patterns(cls) -> list[str]:
         """Get all Redis key patterns for cleanup and monitoring.
