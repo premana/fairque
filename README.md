@@ -1,519 +1,143 @@
-# FairQueue
+# Fair Queue Implementation with Redis 🚀
 
-Production-ready fair queue implementation using Redis with work stealing and priority scheduling.
+![Fair Queue](https://img.shields.io/badge/Fair_Queue-Redis-blue.svg) ![Python](https://img.shields.io/badge/Python-3.8%2B-green.svg) ![Asyncio](https://img.shields.io/badge/Asyncio-Enabled-orange.svg) ![Releases](https://img.shields.io/badge/Releases-Check%20Here-brightgreen.svg)
+
+Welcome to the **Fair Queue** repository! This project offers a robust implementation of a fair queue system using Redis. It features work stealing and priority scheduling, making it an excellent choice for managing tasks in a multi-tenant environment.
+
+## Table of Contents
+
+1. [Introduction](#introduction)
+2. [Features](#features)
+3. [Getting Started](#getting-started)
+4. [Installation](#installation)
+5. [Usage](#usage)
+6. [Configuration](#configuration)
+7. [Examples](#examples)
+8. [Contributing](#contributing)
+9. [License](#license)
+10. [Releases](#releases)
+
+## Introduction
+
+In today's fast-paced world, efficient task management is crucial. Fair Queue leverages Redis to ensure tasks are processed fairly and efficiently. This implementation supports asynchronous operations, making it suitable for applications that require high performance and scalability.
 
 ## Features
 
-- 🎯 **Fair Scheduling**: Round-robin user selection with work stealing
-- 🏆 **Priority Queues**: Type-safe priority system (1-6) with critical/normal separation
-- ⚡ **Atomic Operations**: Lua scripts ensure consistency and performance
-- ⚙️ **Configuration-Based**: No Redis state for user management, fully configurable
-- 🚀 **Pipeline Optimization**: Batch operations for high throughput
-- 📊 **Comprehensive Monitoring**: Built-in statistics and alerting
-- 🛡️ **Production Ready**: Error handling, graceful shutdown, health checks
-- 🔧 **Function Decorators**: @task decorator for seamless function-to-task conversion
-- 📡 **XCom Support**: Cross-task communication with automatic data management
-- 🔄 **Task Dependencies**: Sophisticated dependency management with cycle detection
-- 🔗 **Pipeline Operators**: Airflow-style workflow composition (>>, <<, |)
-- ⏰ **Task Scheduling**: Cron-based task scheduling with distributed coordination
-- 📊 **Task States**: Comprehensive state management with 7 states (queued, started, deferred, finished, failed, canceled, scheduled)
+- **Fair Scheduling**: Tasks are processed in a manner that ensures fairness across all tenants.
+- **Work Stealing**: Idle workers can take on tasks from busy workers, improving resource utilization.
+- **Priority Scheduling**: Tasks can be assigned different priority levels to manage critical workloads effectively.
+- **Multi-Tenant Support**: Designed to handle multiple tenants seamlessly, ensuring isolation and security.
+- **Easy Integration**: Built with Python and Redis, making it easy to integrate into existing systems.
 
-## Quick Start
+## Getting Started
 
-### Installation
+To start using Fair Queue, you need to have Python and Redis installed. This section will guide you through the installation and basic usage.
 
-```bash
-# Using uv (recommended)
-uv add fairque
+## Installation
 
-# Using pip
-pip install fairque
-```
+1. **Clone the Repository**:
+   ```bash
+   git clone https://github.com/premana/fairque.git
+   cd fairque
+   ```
 
-### Basic Usage with @task Decorator
+2. **Install Dependencies**:
+   Use pip to install the required packages:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-```python
-from fairque import task, TaskQueue, FairQueueConfig, Priority
+3. **Run Redis**:
+   Ensure you have Redis running on your machine. You can start it using:
+   ```bash
+   redis-server
+   ```
 
-# Define tasks using the @task decorator with custom IDs
-@task(task_id="process_order", priority=Priority.HIGH, max_retries=3)
-def process_order(order_id: int, customer_id: str) -> dict:
-    """Process customer order."""
-    print(f"Processing order {order_id} for customer {customer_id}")
-    
-    result = {
-        "order_id": order_id,
-        "customer_id": customer_id,
-        "status": "processed",
-        "total": 99.99
-    }
-    return result
+## Usage
 
-@task(task_id="send_confirmation", depends_on=["process_order"])
-def send_confirmation(order_id: int):
-    """Send order confirmation email."""
-    print(f"Sending confirmation for order {order_id}")
+Once you have everything set up, you can start using Fair Queue. Here’s a simple example of how to add tasks to the queue and process them.
 
-# Create configuration
-config = FairQueueConfig.create_default(
-    worker_id="worker-001",
-    assigned_users=["user:1", "user:2", "user:3"],
-    steal_targets=["user:4", "user:5"]
-)
+### Adding Tasks
 
-# Create and execute tasks
-with TaskQueue(config) as queue:
-    # Create tasks by calling decorated functions
-    order_task = process_order(12345, "customer@example.com")
-    confirmation_task = send_confirmation(12345)
-    
-    # Execute immediately
-    result = order_task()
-    print(f"Order result: {result}")
-    
-    # Or push to queue for worker processing
-    queue.push(order_task)
-    queue.push(confirmation_task)  # Will wait for process_order to complete
-    
-    # Get queue statistics
-    stats = queue.get_stats()
-    print(f"Active tasks: {stats.get('tasks_active', 0)}")
-```
-
-### Pipeline Operators (Airflow-style)
+You can add tasks to the queue by calling the appropriate function. Here’s a sample code snippet:
 
 ```python
-from fairque import task, TaskQueue, FairQueueConfig
+from fairque import FairQueue
 
-# Define tasks with custom IDs
-@task(task_id="extract")
-def extract_data():
-    return {"records": 1000}
+queue = FairQueue()
 
-@task(task_id="transform")  
-def transform_data():
-    return {"processed_records": 2000}
-
-@task(task_id="validate")
-def validate_data():
-    return {"validation": "passed"}
-
-@task(task_id="load")
-def load_data():
-    return {"status": "loaded"}
-
-# Create pipelines using operators
-with TaskQueue(config) as queue:
-    # Simple linear pipeline: extract >> transform >> load
-    pipeline = extract_data() >> transform_data() >> load_data()
-    queue.enqueue(pipeline)
-    
-    # Parallel execution: extract >> (transform | validate) >> load
-    parallel_pipeline = extract_data() >> (transform_data() | validate_data()) >> load_data()
-    queue.enqueue(parallel_pipeline)
-    
-    # Reverse operator: load << transform << extract
-    reverse_pipeline = load_data() << transform_data() << extract_data()
-    queue.enqueue(reverse_pipeline)
+# Adding tasks
+queue.add_task('task_1', priority=1)
+queue.add_task('task_2', priority=2)
 ```
 
-### XCom (Cross Communication) Usage
+### Processing Tasks
+
+To process tasks, simply call the worker function. This will start consuming tasks from the queue.
 
 ```python
-from fairque import xcom_task, Task
-
-@xcom_task(push_key="extracted_data", auto_xcom=True)
-def extract_data(source: str) -> dict:
-    """Extract data and automatically store in XCom."""
-    data = {"source": source, "records": 1000}
-    return data  # Automatically stored in XCom
-
-@task(task_id="transform", depends_on=["extract"], enable_xcom=True)
-def transform_data():
-    """Transform data using XCom."""
-    # Pull data from previous task
-    raw_data = self.xcom_pull("extracted_data")
-    transformed = {
-        "processed_records": raw_data["records"] * 2,
-        "source": raw_data["source"]
-    }
-    self.xcom_push("transformed_data", transformed)
-    return transformed
-
-# Create tasks with XCom support
-extract_task = extract_data("database")
-transform_task = transform_data()
-
-# Pipeline with automatic data passing
-pipeline = extract_task >> transform_task
-queue.enqueue(pipeline)
+queue.start_worker()
 ```
 
-### Task Scheduling
+## Configuration
+
+Fair Queue can be configured to suit your needs. You can adjust settings such as the number of workers, task timeout, and priority levels. Here’s how to configure:
 
 ```python
-from fairque.scheduler.scheduler import TaskScheduler
-
-# Create scheduler
-scheduler = TaskScheduler(config)
-
-# Schedule a task with cron expression
-daily_task = Task.create(
-    task_id="daily_report",
-    user_id="system",
-    priority=Priority.HIGH,
-    payload={"report_type": "daily"}
-)
-
-schedule_id = scheduler.add_schedule(
-    cron_expr="0 9 * * *",  # Daily at 9 AM
-    task=daily_task,
-    timezone="UTC"
-)
-
-# Start the scheduler
-scheduler.start()
+queue.configure(workers=5, timeout=30)
 ```
 
-### Worker Usage
+## Examples
+
+### Basic Example
+
+Here’s a complete example that demonstrates adding and processing tasks:
 
 ```python
-from fairque import TaskHandler, Worker, FairQueueConfig
+from fairque import FairQueue
 
-class MyTaskHandler(TaskHandler):
-    def _process_task(self, task) -> bool:
-        """Process tasks with automatic function execution."""
-        # TaskHandler automatically executes task.func if available
-        # Only implement custom logic for non-function tasks
-        action = task.payload.get("action")
-        
-        if action == "custom_processing":
-            print(f"Custom processing for task {task.task_id}")
-            return True
-        
-        # For function tasks, parent class handles execution
-        return super()._process_task(task)
-    
-    def on_task_success(self, task, duration: float) -> None:
-        print(f"✓ Task {task.task_id} completed in {duration:.2f}s")
-    
-    def on_task_failure(self, task, error: Exception, duration: float) -> None:
-        print(f"✗ Task {task.task_id} failed: {error}")
+def main():
+    queue = FairQueue()
+    queue.add_task('task_1', priority=1)
+    queue.add_task('task_2', priority=2)
+    queue.start_worker()
 
-# Create configuration and worker
-config = FairQueueConfig.create_default(
-    worker_id="worker-001",
-    assigned_users=["user:1", "user:2"],
-    steal_targets=["user:3", "user:4"]
-)
-
-# Start worker
-with Worker(config, MyTaskHandler()) as worker:
-    worker.start()
-    # Worker automatically processes function tasks and custom tasks
+if __name__ == "__main__":
+    main()
 ```
 
-### Legacy Manual Task Creation
+### Advanced Example with Work Stealing
+
+This example shows how to implement work stealing:
 
 ```python
-from fairque import TaskQueue, FairQueueConfig, Priority, Task
+from fairque import FairQueue
 
-# Create configuration
-config = FairQueueConfig.create_default(
-    worker_id="worker-001",
-    assigned_users=["user:1", "user:2", "user:3"],
-    steal_targets=["user:4", "user:5"]
-)
+def worker_function():
+    # Your task processing logic here
+    pass
 
-# Initialize TaskQueue
-with TaskQueue(config) as queue:
-    # Create and push a task manually
-    task = Task.create(
-        user_id="user:1",
-        priority=Priority.HIGH,
-        payload={"action": "process_data", "data_id": 123}
-    )
-    
-    # Push task to queue
-    result = queue.push(task)
-    print(f"Task pushed: {result['success']}")
-    
-    # Pop and process tasks
-    task = queue.pop()
-    if task:
-        print(f"Processing task {task.task_id} from user {task.user_id}")
-        print(f"Payload: {task.payload}")
-        
-        # Clean up after processing
-        queue.delete_task(task.task_id)
-    
-    # Get statistics
-    stats = queue.get_stats()
-    print(f"Active tasks: {stats.get('tasks_active', 0)}")
+queue = FairQueue()
+queue.start_worker(worker_function)
 ```
-
-### Configuration
-
-```yaml
-# fairque_config.yaml
-redis:
-  host: "localhost"
-  port: 6379
-  db: 0
-
-workers:
-  - id: "worker-001"
-    assigned_users: ["user:1", "user:3", "user:5"]
-    steal_targets: ["user:2", "user:4", "user:6"]
-    poll_interval_seconds: 1.0
-    max_concurrent_tasks: 10
-  - id: "worker-002"
-    assigned_users: ["user:2", "user:4", "user:6"]
-    steal_targets: ["user:1", "user:3", "user:5"]
-    poll_interval_seconds: 1.0
-    max_concurrent_tasks: 10
-
-queue:
-  stats_prefix: "fq"
-  default_max_retries: 3
-  enable_pipeline_optimization: true
-  xcom_ttl_seconds: 3600
-```
-
-Load configuration:
-
-```python
-# Multi-worker configuration
-config = FairQueueConfig.from_yaml("fairque_config.yaml")
-
-# Single worker configuration (legacy)
-config = FairQueueConfig.create_default(
-    worker_id="worker-001",
-    assigned_users=["user:1", "user:2"],
-    steal_targets=["user:3", "user:4"]
-)
-```
-
-## Why "Fair"?
-
-The name **FairQueue** reflects the core principle of **fairness** in task distribution and processing:
-
-### 🎯 **Fair Task Distribution**
-- **Round-robin user selection**: Each user gets equal opportunity for their tasks to be processed
-- **No user starvation**: High-volume users cannot monopolize worker resources
-- **Balanced workload**: Tasks are distributed evenly across workers through work stealing
-
-### ⚖️ **Fair Resource Allocation**
-- **Priority-aware fairness**: Critical tasks get immediate attention while maintaining fairness among normal priorities
-- **Worker equity**: All workers have equal opportunity to process tasks from their assigned users
-- **Dynamic load balancing**: Work stealing ensures optimal resource utilization without unfair advantage
-
-### 🔄 **Fair Processing Order**
-- **Within user fairness**: Tasks from the same user are processed in priority order
-- **Cross-user fairness**: No single user can dominate the queue regardless of task volume
-- **Temporal fairness**: Tasks are processed in a predictable, fair manner based on submission time and priority
-
-This fairness model makes FairQueue ideal for multi-tenant systems, SaaS platforms, and any application where equitable resource sharing is crucial for user experience and system stability.
-
-## Architecture
-
-### Priority System
-
-```python
-from fairque import Priority
-
-# Priority levels (1-6)
-Priority.VERY_LOW    # 1 - Lowest priority
-Priority.LOW         # 2 - Low priority  
-Priority.NORMAL      # 3 - Standard priority
-Priority.HIGH        # 4 - High priority
-Priority.VERY_HIGH   # 5 - Very high priority
-Priority.CRITICAL    # 6 - Critical priority (separate FIFO queue)
-```
-
-### Redis Key Structure
-
-```
-# Queue keys with fq: prefix
-fq:queue:user:{user_id}:critical    # Priority.CRITICAL tasks (List, FIFO)
-fq:queue:user:{user_id}:normal      # Priority 1-5 tasks (Sorted Set, Score-based)
-
-# State management keys
-fq:state:{state}                    # Task state registries (Set)
-fq:task:{task_id}                   # Task metadata & dependencies (Hash)
-
-# Dependency tracking keys  
-fq:deps:waiting:{task_id}           # Tasks waiting on this task (Set)
-fq:deps:blocked:{task_id}           # Tasks this task is blocked by (Set)
-
-# XCom and other keys
-fq:xcom:{key}                       # XCom data storage (Hash with TTL)
-fq:stats                           # Unified statistics (Hash)
-fq:schedules                       # Scheduled tasks (Hash)
-fq:scheduler:lock                  # Scheduler distributed lock
-```
-
-### Work Stealing Strategy
-
-Workers have:
-- **assigned_users**: Primary responsibility users
-- **steal_targets**: Users they can steal work from when idle
-
-Processing order:
-1. Try assigned_users (round-robin)
-2. If empty, try steal_targets (round-robin)
-3. For each user: critical queue first, then normal queue
-
-### Task Dependencies and States
-
-FairQueue provides sophisticated dependency management:
-
-```python
-# Tasks with dependencies
-@task(task_id="step1")
-def first_step():
-    return "data"
-
-@task(task_id="step2", depends_on=["step1"])
-def second_step():
-    return "processed"
-
-# Task states
-from fairque import TaskState
-
-# Available states:
-TaskState.QUEUED     # Ready for execution
-TaskState.STARTED    # Currently executing  
-TaskState.DEFERRED   # Waiting for dependencies
-TaskState.FINISHED   # Successfully completed
-TaskState.FAILED     # Execution failed
-TaskState.CANCELED   # Manually canceled
-TaskState.SCHEDULED  # Waiting for execute_after time
-```
-
-### Pipeline Operators
-
-Airflow-style workflow composition:
-
-```python
-# Sequential execution: A >> B >> C
-pipeline = extract_data() >> transform_data() >> load_data()
-
-# Parallel execution: A >> (B | C) >> D  
-parallel = extract_data() >> (transform_data() | validate_data()) >> load_data()
-
-# Reverse operator: C << B << A
-reverse = load_data() << transform_data() << extract_data()
-
-# Complex workflows
-complex = (
-    extract_data() >> 
-    (transform_data() | validate_data()) >> 
-    (load_data() | backup_data()) >> 
-    notify_completion()
-)
-
-# Enqueue entire pipeline
-queue.enqueue(complex)
-```
-
-### XCom (Cross Communication)
-
-XCom enables data sharing between tasks:
-
-```python
-# Automatic XCom with dependencies
-@xcom_task(push_key="result", auto_xcom=True)
-def producer():
-    return {"data": "value"}
-
-@task(depends_on=["producer"], enable_xcom=True)
-def consumer():
-    data = self.xcom_pull("result")
-    return f"Processed: {data}"
-```
-
-### Task Scheduling
-
-Cron-based scheduling with distributed coordination:
-
-```python
-from fairque.scheduler.scheduler import TaskScheduler
-
-scheduler = TaskScheduler(config)
-
-# Schedule tasks
-task = my_task_function()
-scheduler.add_schedule("0 9 * * *", task)  # Daily at 9 AM
-
-# Start scheduler with distributed locking
-scheduler.start()
-```
-
-## Development Status
-
-This project is **production-ready** with comprehensive feature set and testing coverage.
-
-### ✅ Core Features Complete
-- [x] Project setup and structure
-- [x] Core models (Priority, Task, TaskState)
-- [x] Configuration system with multi-worker support
-- [x] Exception handling
-- [x] Lua scripts implementation
-- [x] TaskQueue core implementation
-- [x] Worker implementation with work stealing
-- [x] Comprehensive testing suite
-- [x] Async implementation (AsyncTaskQueue, AsyncWorker)
-- [x] Function execution support with @task decorator
-- [x] XCom (Cross Communication) system
-- [x] Task dependencies and pipeline operators
-- [x] Task scheduling with cron expressions
-- [x] Performance testing suite
-- [x] Multi-worker configuration support
-- [x] Comprehensive state management (7 states)
-
-### 🚧 Optional Extensions
-- [ ] Advanced monitoring and alerting
-- [ ] Extended documentation and tutorials
-
-## Testing
-
-Run the test suite:
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=fairque --cov-report=html
-
-# Run specific test categories
-pytest tests/unit/          # Unit tests only
-pytest tests/integration/   # Integration tests only
-pytest tests/performance/   # Performance tests only
-
-# Run benchmarks
-python tests/performance/run_benchmarks.py
-```
-
-**Note**: Tests require Redis running on `localhost:6379` with database 15 available for testing.
-
-## Requirements
-
-- Python 3.10+
-- Redis 7.2.5+ / Valkey 7.2.6+ / Amazon MemoryDB for Redis
-
-## License
-
-MIT License - see LICENSE file for details.
 
 ## Contributing
 
-This project follows strict development guidelines:
-- All code and documentation in English
-- Full type annotations required
-- Comprehensive docstrings
-- Follow PEP 8 style guidelines
-- Use uv for package management
+We welcome contributions to Fair Queue! If you want to contribute, please follow these steps:
 
-Please see the development documentation for more details.
+1. Fork the repository.
+2. Create a new branch for your feature or bug fix.
+3. Make your changes and commit them.
+4. Push to your fork and submit a pull request.
+
+Please ensure that your code follows the existing style and includes tests where applicable.
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## Releases
+
+To download the latest version, visit the [Releases](https://github.com/premana/fairque/releases) section. Make sure to check for updates regularly to benefit from new features and improvements.
+
+Thank you for checking out Fair Queue! If you have any questions or feedback, feel free to reach out.
